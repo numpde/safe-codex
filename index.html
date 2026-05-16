@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>safe-codex</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --text: #1d2429;
+      --muted: #5b6870;
+      --border: #d9dedc;
+      --accent: #0f766e;
+      --code-bg: #eef2ef;
+      --warn-bg: #fff7dc;
+      --warn-border: #e2b84a;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111513;
+        --panel: #181d1b;
+        --text: #e8ece9;
+        --muted: #a8b2ad;
+        --border: #303833;
+        --accent: #5eead4;
+        --code-bg: #202722;
+        --warn-bg: #2b2412;
+        --warn-border: #80662a;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+      max-width: 1280px;
+      margin: 0 auto;
+      min-height: 100vh;
+    }
+
+    nav {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 32px 24px;
+      border-right: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg), var(--panel) 35%);
+    }
+
+    nav strong {
+      display: block;
+      margin-bottom: 18px;
+      font-size: 1.05rem;
+    }
+
+    nav a {
+      display: block;
+      margin: 9px 0;
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    nav a:hover {
+      color: var(--accent);
+    }
+
+    main {
+      padding: 44px clamp(24px, 5vw, 72px) 72px;
+      max-width: 960px;
+    }
+
+    header {
+      margin-bottom: 36px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 4vw, 3.4rem);
+      line-height: 1.05;
+    }
+
+    h2 {
+      margin: 42px 0 14px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      font-size: 1.55rem;
+    }
+
+    h3 {
+      margin: 28px 0 10px;
+      font-size: 1.05rem;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    ul {
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.94em;
+    }
+
+    code {
+      padding: 0.12em 0.34em;
+      border-radius: 4px;
+      background: var(--code-bg);
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 12px 0 20px;
+      padding: 14px 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--code-bg);
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 22px;
+      background: var(--panel);
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: color-mix(in srgb, var(--panel), var(--code-bg) 60%);
+    }
+
+    .lede {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 1.15rem;
+    }
+
+    .callout {
+      margin: 18px 0;
+      padding: 14px 16px;
+      border: 1px solid var(--warn-border);
+      border-radius: 8px;
+      background: var(--warn-bg);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }
+
+    .tile {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    @media (max-width: 800px) {
+      .layout {
+        display: block;
+      }
+
+      nav {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      nav a {
+        display: inline-block;
+        margin: 6px 12px 6px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav aria-label="Documentation">
+      <strong>safe-codex</strong>
+      <a href="#overview">Overview</a>
+      <a href="#install">Build</a>
+      <a href="#run">Run</a>
+      <a href="#storage">Storage</a>
+      <a href="#profiles">Profiles</a>
+      <a href="#multiple-sessions">Multiple Sessions</a>
+      <a href="#mounts">Mounts</a>
+      <a href="#network">Network</a>
+      <a href="#auth">Authentication</a>
+      <a href="#maintenance">Maintenance</a>
+      <a href="#checks">Checks</a>
+    </nav>
+
+    <main>
+      <header id="overview">
+        <h1>safe-codex</h1>
+        <p class="lede">Run Codex in a disposable Podman or Docker container with a small, explicit host surface.</p>
+      </header>
+
+      <section>
+        <h2>What It Does</h2>
+        <div class="grid">
+          <div class="tile">
+            <strong>Small host surface</strong>
+            <p>Only the selected workspace and explicit extra mounts are exposed to the container.</p>
+          </div>
+          <div class="tile">
+            <strong>Disposable runtime</strong>
+            <p>The container root filesystem is read-only, capabilities are dropped, and containers are removed on exit.</p>
+          </div>
+          <div class="tile">
+            <strong>Separate Codex state</strong>
+            <p>Container Codex state lives in an engine named volume, not host <code>~/.codex</code>.</p>
+          </div>
+          <div class="tile">
+            <strong>Regulated network</strong>
+            <p>Default egress goes through Squid, with local/private destinations blocked.</p>
+          </div>
+        </div>
+
+        <p>Rootless Podman is preferred when available. Docker works, but a user in the <code>docker</code> group should be treated as effectively root-capable on the host.</p>
+      </section>
+
+      <section>
+        <h2>Repository Files</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>Containerfile</code></td><td>Codex runtime image.</td></tr>
+            <tr><td><code>Containerfile.proxy</code></td><td>Squid proxy image.</td></tr>
+            <tr><td><code>proxy/squid-nonlocal.conf</code></td><td>Default egress policy: Internet allowed, local/private IP destinations blocked.</td></tr>
+            <tr><td><code>proxy/squid-openai.conf</code></td><td>Stricter egress policy for OpenAI/ChatGPT domains.</td></tr>
+            <tr><td><code>bin/safe-codex</code></td><td>Launcher for Podman or Docker.</td></tr>
+            <tr><td><code>bin/check</code></td><td>Non-invasive syntax and Dockerfile checks.</td></tr>
+            <tr><td><code>safe-codex.env.example</code></td><td>Optional local defaults.</td></tr>
+          </tbody>
+        </table>
+
+        <p>The launcher parses <code>.env</code> as plain <code>KEY=VALUE</code>. It does not source shell code, and it accepts only <code>SAFE_CODEX_*</code> keys plus <code>OPENAI_API_KEY</code>.</p>
+      </section>
+
+      <section id="install">
+        <h2>Build</h2>
+        <p>Check what the launcher sees before building or running:</p>
+        <pre><code>./bin/safe-codex-podman doctor</code></pre>
+
+        <p>Build with Podman:</p>
+        <pre><code>./bin/safe-codex-podman build</code></pre>
+
+        <p>Build with Docker:</p>
+        <pre><code>./bin/safe-codex-docker build</code></pre>
+
+        <p>The build uses npm once inside the build container with <code>--ignore-scripts</code>, then removes npm, npx, and corepack from the runtime image.</p>
+      </section>
+
+      <section id="run">
+        <h2>Run Codex</h2>
+        <p>From the project you want Codex to work on:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run</code></pre>
+
+        <p>Docker equivalent:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-docker run</code></pre>
+
+        <h3>Default behavior</h3>
+        <ul>
+          <li>Profile: <code>default</code>.</li>
+          <li>Workspace: current directory mounted at <code>/workspace</code> read/write.</li>
+          <li>Persistent state: <code>safe-codex-state-default</code> mounted at <code>/home/codex/.codex</code>.</li>
+          <li>Nonpersistent home: <code>/home/codex</code> tmpfs with <code>noexec</code>.</li>
+          <li>Network: <code>proxy</code>, using <code>safe-codex-proxy-nonlocal</code>.</li>
+          <li>Lifecycle: Codex containers are removed on exit; state persists in the named volume.</li>
+        </ul>
+
+        <p>For a read-only-by-default workflow, set <code>SAFE_CODEX_WORKSPACE_MODE=ro</code> in <code>.env</code>, then pass <code>--workspace-rw</code> only when a run should edit the workspace.</p>
+
+        <h3>Detach and resume</h3>
+        <p>Detach from a live container without stopping Codex:</p>
+        <pre><code>Ctrl-p Ctrl-q</code></pre>
+
+        <p>Attach again:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman attach</code></pre>
+
+        <p>If the machine restarted or Codex exited, run the same <code>run</code> command again. The process is gone, but Codex auth/session files persist in the profile volume.</p>
+
+        <p>Ask Codex to resume from the persistent volume:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run -- resume</code></pre>
+      </section>
+
+      <section id="storage">
+        <h2>Storage Model</h2>
+        <p>The container home is split deliberately.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Container path</th>
+              <th>Backing storage</th>
+              <th>Persistence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>/home/codex/.codex</code></td><td>Engine named volume <code>safe-codex-state-PROFILE</code></td><td>Persists</td></tr>
+            <tr><td><code>/home/codex/.cache</code></td><td>tmpfs under <code>/home/codex</code></td><td>Deleted on exit</td></tr>
+            <tr><td><code>/home/codex/.local</code></td><td>tmpfs under <code>/home/codex</code></td><td>Deleted on exit</td></tr>
+            <tr><td><code>/home/codex</code> except <code>.codex</code></td><td>tmpfs with <code>nosuid,nodev,noexec</code></td><td>Deleted on exit</td></tr>
+            <tr><td><code>/tmp</code></td><td>tmpfs with <code>nosuid,nodev,noexec</code></td><td>Deleted on exit</td></tr>
+            <tr><td><code>/run</code></td><td>tmpfs with <code>nosuid,nodev,noexec</code></td><td>Deleted on exit</td></tr>
+            <tr><td><code>/workspace</code></td><td>Selected host workspace bind mount</td><td>Host files</td></tr>
+          </tbody>
+        </table>
+
+        <p>For the default Podman profile, the persistent volume is stored on the host at:</p>
+        <pre><code>~/.local/share/containers/storage/volumes/safe-codex-state-default/_data</code></pre>
+
+        <p>Inspect through Podman so rootless user-namespace ownership is displayed correctly:</p>
+        <pre><code>podman volume inspect safe-codex-state-default
+podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state-default/_data</code></pre>
+
+        <div class="callout">
+          <p>Do not mount or copy host <code>~/.codex</code> into the container. The profile volume may contain Codex auth material, logs, sessions, plugins, skills, and local state.</p>
+        </div>
+      </section>
+
+      <section id="profiles">
+        <h2>Profiles</h2>
+        <p>Use separate profiles for separate trust zones:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --profile id-overlay \
+  --workspace /path/to/id-overlay</code></pre>
+
+        <p>This creates container name <code>safe-codex-id-overlay</code> and state volume <code>safe-codex-state-id-overlay</code>. Profile names may contain only letters, numbers, dot, underscore, and dash.</p>
+
+        <p>List existing persistent profiles and any live Codex containers:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman profiles</code></pre>
+      </section>
+
+      <section id="multiple-sessions">
+        <h2>Multiple Sessions</h2>
+        <p>A profile controls Codex's persistent state. A workspace controls which host files are mounted at <code>/workspace</code>. Changing the profile while keeping the same workspace gives you a separate Codex state volume looking at the same host files.</p>
+
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --profile edit-1 \
+  --workspace /path/to/project \
+  --workspace-rw
+
+/path/to/safe-codex/bin/safe-codex-podman run \
+  --profile edit-2 \
+  --workspace /path/to/project \
+  --workspace-rw</code></pre>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Setting</th>
+              <th>What changes</th>
+              <th>What is shared</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--profile edit-1</code> versus <code>--profile edit-2</code></td>
+              <td>Separate containers and separate state volumes: <code>safe-codex-state-edit-1</code> and <code>safe-codex-state-edit-2</code>.</td>
+              <td>Nothing in <code>~/.codex</code> is shared between those profiles.</td>
+            </tr>
+            <tr>
+              <td>Same <code>--workspace /path/to/project</code></td>
+              <td>The same host directory is mounted into each container at <code>/workspace</code>.</td>
+              <td>Both sessions see the same files, git state, and uncommitted changes in that host directory.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>If two sessions mount the same workspace read/write, they can edit the same files at the same time. The profile boundary separates Codex state; it does not isolate the shared workspace bind mount.</p>
+        </div>
+
+        <p>A safer pattern is one writable editor plus one or more read-only reviewers:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --profile edit \
+  --workspace /path/to/project \
+  --workspace-rw
+
+/path/to/safe-codex/bin/safe-codex-podman run \
+  --profile review \
+  --workspace /path/to/project \
+  --workspace-ro</code></pre>
+
+        <p>If two sessions should edit independently, use separate git worktrees or clones and give each one its own profile.</p>
+      </section>
+
+      <section id="mounts">
+        <h2>Read-Only and Extra Mounts</h2>
+        <p>Inspect a repo read-only:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --workspace /path/to/suspicious \
+  --workspace-ro</code></pre>
+
+        <p>Override a read-only <code>.env</code> default for a normal editing session:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --workspace /path/to/project \
+  --workspace-rw</code></pre>
+
+        <p>Add one writable output folder:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --workspace /path/to/project \
+  --rw /tmp/codex-output:/output</code></pre>
+
+        <p>Add a read-only reference folder:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --workspace /path/to/project \
+  --ro /path/to/docs:/mnt/docs</code></pre>
+
+        <p>The launcher refuses risky mounts by default, including <code>/run</code>, <code>/var/run</code>, <code>/dev</code>, <code>/proc</code>, <code>/sys</code>, <code>~/.ssh</code>, <code>~/.codex</code>, and mount trees containing Unix sockets. Symlinks are resolved before this check. Paths containing commas or newlines are rejected because Docker and Podman <code>--mount</code> cannot represent them unambiguously.</p>
+
+        <p>Extra mount destinations are constrained to:</p>
+        <pre><code>/mnt/rw...
+/mnt/ro...
+/workspace/...
+/input...
+/output...</code></pre>
+
+        <p>Override these checks only with a concrete reason:</p>
+        <pre><code>--allow-risky-mounts</code></pre>
+      </section>
+
+      <section id="network">
+        <h2>Network Modes</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Mode</th>
+              <th>Behavior</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--network proxy</code></td>
+              <td>Default. Codex uses Squid on an internal network. The proxy blocks local/private destinations such as loopback, RFC1918 ranges, link-local, multicast, and IPv6 local ranges.</td>
+            </tr>
+            <tr>
+              <td><code>--network openai</code></td>
+              <td>Stricter allowlist for OpenAI/ChatGPT-related domains. Useful for API-key use; often too strict for browser login, package registries, git remotes, or MCP servers.</td>
+            </tr>
+            <tr>
+              <td><code>--network none</code></td>
+              <td>No network. Useful for offline inspection; Codex API calls will not work.</td>
+            </tr>
+            <tr>
+              <td><code>--network bridge --allow-bridge-network</code></td>
+              <td>Unrestricted container bridge. This bypasses the proxy and is intentionally gated.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>The proxy uses a dedicated egress network named <code>safe-codex-egress-nonlocal</code> unless <code>SAFE_CODEX_EXTERNAL_NETWORK</code> is set.</p>
+      </section>
+
+      <section id="auth">
+        <h2>Authentication</h2>
+        <p>Preferred: pass an API key from the environment.</p>
+        <pre><code>export OPENAI_API_KEY=...
+/path/to/safe-codex/bin/safe-codex-podman run</code></pre>
+
+        <p>Do not mount host <code>~/.codex</code>. That directory contains live auth/session material. If you use browser/login auth inside the container, it is stored in the profile's named Codex-state volume.</p>
+
+        <p>Environment variables passed with <code>-e</code> or <code>--env-file</code> are visible through container inspection while the container is running. The launcher removes the Codex container on exit so those values are not left in stopped container metadata.</p>
+      </section>
+
+      <section>
+        <h2>Shell</h2>
+        <p>Open a shell with the same containment settings:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman shell \
+  --workspace /path/to/project</code></pre>
+      </section>
+
+      <section id="maintenance">
+        <h2>Maintenance</h2>
+        <p>Show readiness:</p>
+        <pre><code>./bin/safe-codex-podman doctor</code></pre>
+
+        <p>Show containers, volumes, and networks:</p>
+        <pre><code>./bin/safe-codex-podman status</code></pre>
+
+        <p>List persistent Codex profiles:</p>
+        <pre><code>./bin/safe-codex-podman profiles</code></pre>
+
+        <p>Inspect a specific proxy profile:</p>
+        <pre><code>./bin/safe-codex-podman proxy status --mode openai</code></pre>
+
+        <p>Stop a live Codex container:</p>
+        <pre><code>./bin/safe-codex-podman stop --profile default</code></pre>
+
+        <p>Remove a running container but keep persistent Codex state:</p>
+        <pre><code>./bin/safe-codex-podman rm --profile default</code></pre>
+
+        <p>Delete a profile's persistent Codex state only when intended:</p>
+        <pre><code>podman volume rm safe-codex-state-default</code></pre>
+      </section>
+
+      <section id="checks">
+        <h2>Checks</h2>
+        <p>Run local syntax checks without building images:</p>
+        <pre><code>./bin/check</code></pre>
+
+        <p>If <code>safe-codex-proxy:latest</code> already exists, this also runs Squid's parser against both proxy profiles. If <code>shellcheck</code> is installed, it is used too.</p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

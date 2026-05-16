@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+bash -n bin/safe-codex bin/safe-codex-docker bin/safe-codex-podman
+
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck bin/safe-codex bin/safe-codex-docker bin/safe-codex-podman bin/check
+fi
+
+if command -v docker >/dev/null 2>&1; then
+  docker build --check -f Containerfile .
+  docker build --check -f Containerfile.proxy .
+
+  proxy_image="${SAFE_CODEX_PROXY_IMAGE:-safe-codex-proxy:latest}"
+  if docker image inspect "$proxy_image" >/dev/null 2>&1; then
+    for config in proxy/squid-nonlocal.conf proxy/squid-openai.conf; do
+      docker run --rm \
+        --entrypoint squid \
+        --mount "type=bind,src=$ROOT_DIR/$config,dst=/tmp/squid.conf,readonly" \
+        "$proxy_image" \
+        -k parse -f /tmp/squid.conf >/dev/null
+    done
+  fi
+fi
+
+printf 'safe-codex checks passed\n'

@@ -1,0 +1,992 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+load_env_file() {
+  local file="$1"
+  local line key value
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      case "$key" in
+        SAFE_CODEX_*|OPENAI_API_KEY) ;;
+        *)
+          printf 'safe-codex: refusing unsupported key in %s: %s\n' "$file" "$key" >&2
+          printf 'safe-codex: .env may define SAFE_CODEX_* and OPENAI_API_KEY only\n' >&2
+          exit 1
+          ;;
+      esac
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ ${#value} -ge 2 ]]; then
+        if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+          value="${value:1:${#value}-2}"
+        elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+          value="${value:1:${#value}-2}"
+        fi
+      fi
+      export "$key=$value"
+    else
+      printf 'safe-codex: refusing to parse non KEY=VALUE line in %s: %s\n' "$file" "$line" >&2
+      exit 1
+    fi
+  done < "$file"
+}
+
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  load_env_file "$ROOT_DIR/.env"
+fi
+
+die() {
+  printf 'safe-codex: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  safe-codex [--engine podman|docker] build [--codex-version VERSION]
+  safe-codex [--engine podman|docker] run [options] [-- CODEX_ARGS...]
+  safe-codex [--engine podman|docker] shell [options]
+  safe-codex [--engine podman|docker] attach [--profile NAME]
+  safe-codex [--engine podman|docker] stop [--profile NAME]
+  safe-codex [--engine podman|docker] rm [--profile NAME]
+  safe-codex [--engine podman|docker] proxy start|stop|status [--mode nonlocal|openai]
+  safe-codex [--engine podman|docker] profiles
+  safe-codex [--engine podman|docker] doctor
+  safe-codex [--engine podman|docker] status
+
+Run options:
+  --profile NAME          Persistent home/session volume suffix.
+  --workspace PATH        Project mounted at /workspace. Default: current dir.
+  --workspace-rw          Mount the workspace read/write.
+  --workspace-ro          Mount the workspace read-only.
+  --rw SRC[:DST]          Add a writable bind mount.
+  --ro SRC[:DST]          Add a read-only bind mount.
+  --network MODE          proxy, openai, none, or bridge. Default: proxy.
+  --env-file PATH         Pass an env file to the container.
+  --name NAME             Override the container name.
+  --memory VALUE          Default: 2g.
+  --cpus VALUE            Default: 2.
+  --pids-limit VALUE      Default: 512.
+  --allow-bridge-network  Permit --network bridge, which bypasses the proxy.
+  --allow-risky-mounts    Allow /run, /var/run, /dev, /proc, /sys, ~/.ssh,
+                          ~/.codex, or mount trees containing sockets.
+
+Notes:
+  - Default network is proxy: Codex gets Internet via a Squid proxy that blocks
+    local/private destinations.
+  - openai network is stricter: only OpenAI/ChatGPT domains are allowed.
+  - Profile names may contain only letters, numbers, dot, underscore, and dash.
+  - Do not mount host ~/.codex. The container uses a named persistent volume.
+EOF
+}
+
+engine_default() {
+  if [[ -n "${SAFE_CODEX_ENGINE:-}" ]]; then
+    printf '%s\n' "$SAFE_CODEX_ENGINE"
+  elif command -v podman >/dev/null 2>&1; then
+    printf '%s\n' podman
+  elif command -v docker >/dev/null 2>&1; then
+    printf '%s\n' docker
+  else
+    die "neither podman nor docker is installed"
+  fi
+}
+
+ENGINE="$(engine_default)"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --engine)
+      [[ $# -ge 2 ]] || die "--engine requires podman or docker"
+      ENGINE="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+command -v "$ENGINE" >/dev/null 2>&1 || die "$ENGINE is not installed or not on PATH"
+
+SUBCOMMAND="${1:-}"
+[[ -n "$SUBCOMMAND" ]] || { usage; exit 1; }
+shift || true
+
+IMAGE="${SAFE_CODEX_IMAGE:-safe-codex:latest}"
+PROXY_IMAGE="${SAFE_CODEX_PROXY_IMAGE:-safe-codex-proxy:latest}"
+PROFILE="${SAFE_CODEX_PROFILE:-default}"
+NETWORK_MODE="${SAFE_CODEX_NETWORK:-proxy}"
+PROXY_MODE="${SAFE_CODEX_PROXY_MODE:-nonlocal}"
+WORKSPACE="${SAFE_CODEX_WORKSPACE:-$PWD}"
+WORKSPACE_MODE="${SAFE_CODEX_WORKSPACE_MODE:-rw}"
+MEMORY="${SAFE_CODEX_MEMORY:-2g}"
+CPUS="${SAFE_CODEX_CPUS:-2}"
+PIDS_LIMIT="${SAFE_CODEX_PIDS_LIMIT:-512}"
+CONTAINER_NAME=""
+ENV_FILE=""
+ALLOW_RISKY_MOUNTS=0
+ALLOW_BRIDGE_NETWORK=0
+RW_MOUNTS=()
+RO_MOUNTS=()
+CMD_ARGS=()
+
+safe_name() {
+  printf '%s' "$1" | tr -c '[:alnum:]_.-' '-'
+}
+
+validate_profile_name() {
+  local profile="$1"
+  [[ -n "$profile" ]] || die "profile name cannot be empty"
+  if [[ ! "$profile" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    die "profile names may contain only letters, numbers, dot, underscore, and dash: $profile"
+  fi
+}
+
+validate_proxy_mode() {
+  case "$PROXY_MODE" in
+    nonlocal|openai) ;;
+    *) die "unknown proxy mode: $PROXY_MODE" ;;
+  esac
+}
+
+container_name() {
+  validate_profile_name "$PROFILE"
+  if [[ -n "$CONTAINER_NAME" ]]; then
+    printf '%s\n' "$CONTAINER_NAME"
+  else
+    printf 'safe-codex-%s\n' "$(safe_name "$PROFILE")"
+  fi
+}
+
+state_volume() {
+  validate_profile_name "$PROFILE"
+  printf 'safe-codex-state-%s\n' "$(safe_name "$PROFILE")"
+}
+
+network_name() {
+  validate_proxy_mode
+  printf 'safe-codex-net-%s\n' "$(safe_name "$PROXY_MODE")"
+}
+
+egress_network_name() {
+  validate_proxy_mode
+  printf 'safe-codex-egress-%s\n' "$(safe_name "$PROXY_MODE")"
+}
+
+proxy_name() {
+  validate_proxy_mode
+  printf 'safe-codex-proxy-%s\n' "$(safe_name "$PROXY_MODE")"
+}
+
+external_network() {
+  if [[ -n "${SAFE_CODEX_EXTERNAL_NETWORK:-}" ]]; then
+    printf '%s\n' "$SAFE_CODEX_EXTERNAL_NETWORK"
+  else
+    egress_network_name
+  fi
+}
+
+engine_has_container() {
+  "$ENGINE" container inspect "$1" >/dev/null 2>&1
+}
+
+engine_container_running() {
+  [[ "$("$ENGINE" inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" == "true" ]]
+}
+
+engine_has_image() {
+  "$ENGINE" image inspect "$1" >/dev/null 2>&1
+}
+
+engine_has_network() {
+  "$ENGINE" network inspect "$1" >/dev/null 2>&1
+}
+
+engine_has_volume() {
+  "$ENGINE" volume inspect "$1" >/dev/null 2>&1
+}
+
+engine_image_id() {
+  "$ENGINE" image inspect -f '{{.Id}}' "$1"
+}
+
+engine_container_label() {
+  local container="$1"
+  local label="$2"
+  "$ENGINE" inspect -f "{{ index .Config.Labels \"$label\" }}" "$container" 2>/dev/null || true
+}
+
+ensure_image() {
+  engine_has_image "$IMAGE" || die "image $IMAGE is missing; run: $0 --engine $ENGINE build"
+}
+
+ensure_proxy_image() {
+  engine_has_image "$PROXY_IMAGE" || die "proxy image $PROXY_IMAGE is missing; run: $0 --engine $ENGINE build"
+}
+
+ensure_network() {
+  local net="$1"
+  if ! engine_has_network "$net"; then
+    "$ENGINE" network create --internal "$net" >/dev/null
+  fi
+}
+
+ensure_egress_network() {
+  local net="$1"
+  if ! engine_has_network "$net"; then
+    "$ENGINE" network create "$net" >/dev/null
+  fi
+}
+
+volume_mount_spec() {
+  local volume="$1"
+  local dst="$2"
+  local spec="type=volume,src=$volume,dst=$dst"
+  if [[ "$ENGINE" == "podman" ]]; then
+    spec+=",U=true"
+  fi
+  printf '%s\n' "$spec"
+}
+
+ensure_state_volume() {
+  local volume="$1"
+  if ! engine_has_volume "$volume"; then
+    "$ENGINE" volume create "$volume" >/dev/null
+  fi
+  local args=(
+    --rm
+    --network none
+    --read-only
+    --security-opt no-new-privileges
+    --cap-drop ALL
+    --pids-limit 64
+    --memory 128m
+    --cpus 0.25
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m
+    --mount "$(volume_mount_spec "$volume" /state)"
+    --entrypoint /bin/sh
+  )
+  if [[ "$ENGINE" == "podman" ]]; then
+    args+=(--userns=keep-id --user "$(id -u):$(id -g)")
+    "$ENGINE" run "${args[@]}" "$IMAGE" -c "chmod 700 /state"
+  else
+    args+=(--user 0:0 --cap-add CHOWN)
+    "$ENGINE" run "${args[@]}" "$IMAGE" -c "chown -R $(id -u):$(id -g) /state && chmod 700 /state"
+  fi
+}
+
+is_risky_mount_root() {
+  local path="$1"
+  local host_home="${SAFE_CODEX_HOST_HOME:-$HOME}"
+  host_home="$(realpath -m -- "$host_home")"
+  case "$path" in
+    /|/home|/root|"$host_home"|/run|/run/*|/var/run|/var/run/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*)
+      return 0
+      ;;
+    "$host_home/.ssh"|"$host_home/.ssh/"*|"$host_home/.codex"|"$host_home/.codex/"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+validate_mount_source() {
+  local src="$1"
+  [[ -e "$src" ]] || die "mount source does not exist: $src"
+  src="$(realpath -e -- "$src")"
+  if [[ "$ALLOW_RISKY_MOUNTS" != 1 ]] && is_risky_mount_root "$src"; then
+    die "refusing risky mount: $src; pass --allow-risky-mounts to override"
+  fi
+  if [[ "$ALLOW_RISKY_MOUNTS" != 1 ]] && [[ -d "$src" ]]; then
+    if find "$src" -xdev -type s -print -quit 2>/dev/null | grep -q .; then
+      die "refusing mount tree containing Unix sockets: $src; pass --allow-risky-mounts to override"
+    fi
+  elif [[ "$ALLOW_RISKY_MOUNTS" != 1 ]] && [[ -S "$src" ]]; then
+    die "refusing socket mount: $src; pass --allow-risky-mounts to override"
+  fi
+  printf '%s\n' "$src"
+}
+
+validate_workspace_source() {
+  local src
+  src="$(validate_mount_source "$1")"
+  [[ -d "$src" ]] || die "workspace must be a directory: $src"
+  printf '%s\n' "$src"
+}
+
+validate_mount_arg_path() {
+  local label="$1"
+  local path="$2"
+  case "$path" in
+    *","*)
+      die "$label contains a comma, which cannot be represented safely in --mount: $path"
+      ;;
+    *$'\n'*)
+      die "$label contains a newline, which cannot be represented safely in --mount"
+      ;;
+  esac
+}
+
+validate_extra_mount_destination() {
+  local dst="$1"
+  [[ "$ALLOW_RISKY_MOUNTS" == 1 ]] && return 0
+
+  case "$dst" in
+    /mnt/rw|/mnt/rw/*|/mnt/ro|/mnt/ro/*|/workspace/*|/input|/input/*|/output|/output/*)
+      return 0
+      ;;
+  esac
+
+  die "refusing extra mount destination: $dst; use /mnt/rw, /mnt/ro, /workspace/*, /input, or /output, or pass --allow-risky-mounts"
+}
+
+parse_mount_spec() {
+  local spec="$1"
+  local default_dst="$2"
+  local src dst
+  if [[ "$spec" == *:* ]]; then
+    src="${spec%%:*}"
+    dst="${spec#*:}"
+  else
+    src="$spec"
+    dst="$default_dst/$(basename "$src")"
+  fi
+  [[ "$dst" == /* ]] || die "mount destination must be absolute: $dst"
+  src="$(validate_mount_source "$src")"
+  validate_mount_arg_path "mount source" "$src"
+  validate_mount_arg_path "mount destination" "$dst"
+  validate_extra_mount_destination "$dst"
+  printf '%s:%s\n' "$src" "$dst"
+}
+
+runtime_security_args() {
+  local args=(
+    --init
+    --read-only
+    --security-opt no-new-privileges
+    --cap-drop ALL
+    --pids-limit "$PIDS_LIMIT"
+    --memory "$MEMORY"
+    --cpus "$CPUS"
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m
+    --tmpfs /run:rw,nosuid,nodev,noexec,size=64m
+  )
+  printf '%s\0' "${args[@]}"
+}
+
+home_tmpfs_spec() {
+  if [[ "$ENGINE" == "podman" ]]; then
+    printf '%s\n' "/home/codex:rw,nosuid,nodev,noexec,size=512m,mode=1777"
+  else
+    printf '%s\n' "/home/codex:rw,nosuid,nodev,noexec,size=512m,mode=700,uid=$(id -u),gid=$(id -g)"
+  fi
+}
+
+user_args() {
+  if [[ "$ENGINE" == "podman" ]]; then
+    printf '%s\0' --userns=keep-id --user "$(id -u):$(id -g)"
+  else
+    printf '%s\0' --user "$(id -u):$(id -g)"
+  fi
+}
+
+proxy_config_for_mode() {
+  validate_proxy_mode
+  case "$PROXY_MODE" in
+    nonlocal) printf '%s\n' "$ROOT_DIR/proxy/squid-nonlocal.conf" ;;
+    openai) printf '%s\n' "$ROOT_DIR/proxy/squid-openai.conf" ;;
+  esac
+}
+
+wait_for_proxy() {
+  local proxy="$1"
+  local attempt
+  for attempt in {1..50}; do
+    engine_container_running "$proxy" || die "proxy exited before it became ready: $proxy"
+    if "$ENGINE" exec "$proxy" sh -c 'nc -z 127.0.0.1 3128' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  die "proxy did not become ready: $proxy"
+}
+
+proxy_start() {
+  [[ $# -eq 0 ]] || die "proxy start accepts --mode before or after the action"
+  ensure_proxy_image
+  local net proxy ext config config_sha image_id recreate
+  net="$(network_name)"
+  proxy="$(proxy_name)"
+  ext="$(external_network)"
+  config="$(proxy_config_for_mode)"
+  config_sha="$(sha256sum "$config" | awk '{print $1}')"
+  image_id="$(engine_image_id "$PROXY_IMAGE")"
+  recreate=0
+
+  ensure_network "$net"
+  ensure_egress_network "$ext"
+
+  if engine_has_container "$proxy"; then
+    if [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-config-sha256)" != "$config_sha" ]] ||
+      [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-image-id)" != "$image_id" ]] ||
+      [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-mode)" != "$PROXY_MODE" ]] ||
+      [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-egress-network)" != "$ext" ]]; then
+      recreate=1
+    fi
+  fi
+
+  if [[ "$recreate" == 1 ]]; then
+    "$ENGINE" rm -f "$proxy" >/dev/null
+  fi
+
+  if engine_has_container "$proxy"; then
+    if ! engine_container_running "$proxy"; then
+      "$ENGINE" start "$proxy" >/dev/null
+    fi
+  else
+    local restart_args=()
+    if [[ "$ENGINE" == docker ]]; then
+      restart_args=(--restart unless-stopped)
+    fi
+    "$ENGINE" run -d \
+      --name "$proxy" \
+      --network "$net" \
+      --label org.safe-codex.role=proxy \
+      --label "org.safe-codex.proxy-mode=$PROXY_MODE" \
+      --label "org.safe-codex.proxy-config-sha256=$config_sha" \
+      --label "org.safe-codex.proxy-image-id=$image_id" \
+      --label "org.safe-codex.proxy-egress-network=$ext" \
+      "${restart_args[@]}" \
+      --read-only \
+      --security-opt no-new-privileges \
+      --cap-drop ALL \
+      --pids-limit 256 \
+      --memory 256m \
+      --cpus 0.25 \
+      --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
+      --tmpfs /run:rw,nosuid,nodev,noexec,size=16m,mode=1777 \
+      --tmpfs /var/cache/squid:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+      --tmpfs /var/log/squid:rw,nosuid,nodev,noexec,size=8m,mode=1777 \
+      --mount "type=bind,src=$config,dst=/etc/squid/squid.conf,readonly" \
+      "$PROXY_IMAGE" >/dev/null
+  fi
+
+  if ! "$ENGINE" inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}' "$proxy" 2>/dev/null | grep -Fxq "$ext"; then
+    "$ENGINE" network connect "$ext" "$proxy" >/dev/null 2>&1 || \
+      die "could not connect proxy to external network $ext; set SAFE_CODEX_EXTERNAL_NETWORK"
+  fi
+
+  wait_for_proxy "$proxy"
+  printf 'proxy running: %s on %s, egress via %s\n' "$proxy" "$net" "$ext"
+}
+
+proxy_stop() {
+  [[ $# -eq 0 ]] || die "proxy stop accepts --mode before or after the action"
+  local proxy
+  proxy="$(proxy_name)"
+  if engine_has_container "$proxy"; then
+    "$ENGINE" stop "$proxy" >/dev/null || true
+  fi
+}
+
+proxy_status() {
+  [[ $# -eq 0 ]] || die "proxy status accepts --mode before or after the action"
+  local proxy
+  proxy="$(proxy_name)"
+  if engine_has_container "$proxy"; then
+    "$ENGINE" ps -a --filter "name=^/${proxy}$"
+  else
+    printf 'proxy container not found: %s\n' "$proxy"
+  fi
+}
+
+parse_proxy_command() {
+  local action=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      start|stop|status)
+        [[ -z "$action" ]] || die "proxy action specified more than once"
+        action="$1"; shift ;;
+      --mode)
+        [[ $# -ge 2 ]] || die "--mode requires nonlocal or openai"
+        case "$2" in
+          nonlocal|openai) PROXY_MODE="$2" ;;
+          *) die "--mode requires nonlocal or openai" ;;
+        esac
+        shift 2 ;;
+      *) die "unknown proxy option: $1" ;;
+    esac
+  done
+
+  case "$action" in
+    start) proxy_start ;;
+    stop) proxy_stop ;;
+    status) proxy_status ;;
+    *) die "proxy requires start, stop, or status" ;;
+  esac
+}
+
+parse_run_options() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile)
+        [[ $# -ge 2 ]] || die "--profile requires a value"
+        PROFILE="$2"; shift 2 ;;
+      --workspace)
+        [[ $# -ge 2 ]] || die "--workspace requires a path"
+        WORKSPACE="$2"; shift 2 ;;
+      --workspace-rw)
+        WORKSPACE_MODE=rw; shift ;;
+      --workspace-ro)
+        WORKSPACE_MODE=ro; shift ;;
+      --rw)
+        [[ $# -ge 2 ]] || die "--rw requires SRC[:DST]"
+        RW_MOUNTS+=("$2"); shift 2 ;;
+      --ro)
+        [[ $# -ge 2 ]] || die "--ro requires SRC[:DST]"
+        RO_MOUNTS+=("$2"); shift 2 ;;
+      --network)
+        [[ $# -ge 2 ]] || die "--network requires proxy, openai, none, or bridge"
+        NETWORK_MODE="$2"; shift 2 ;;
+      --env-file)
+        [[ $# -ge 2 ]] || die "--env-file requires a path"
+        ENV_FILE="$2"; shift 2 ;;
+      --name)
+        [[ $# -ge 2 ]] || die "--name requires a value"
+        CONTAINER_NAME="$2"; shift 2 ;;
+      --memory)
+        [[ $# -ge 2 ]] || die "--memory requires a value"
+        MEMORY="$2"; shift 2 ;;
+      --cpus)
+        [[ $# -ge 2 ]] || die "--cpus requires a value"
+        CPUS="$2"; shift 2 ;;
+      --pids-limit)
+        [[ $# -ge 2 ]] || die "--pids-limit requires a value"
+        PIDS_LIMIT="$2"; shift 2 ;;
+      --allow-bridge-network)
+        ALLOW_BRIDGE_NETWORK=1; shift ;;
+      --allow-risky-mounts)
+        ALLOW_RISKY_MOUNTS=1; shift ;;
+      --)
+        shift
+        CMD_ARGS=("$@")
+        return 0
+        ;;
+      -*)
+        die "unknown run option: $1" ;;
+      *)
+        CMD_ARGS=("$@")
+        return 0
+        ;;
+    esac
+  done
+}
+
+run_container() {
+  local entrypoint="$1"
+  shift
+
+  CMD_ARGS=()
+  parse_run_options "$@"
+
+  local name volume
+  name="$(container_name)"
+  volume="$(state_volume)"
+
+  if engine_has_container "$name"; then
+    if engine_container_running "$name"; then
+      printf 'attaching to running container: %s\n' "$name" >&2
+      exec "$ENGINE" attach "$name"
+    fi
+  fi
+
+  WORKSPACE="$(validate_workspace_source "$WORKSPACE")"
+  validate_mount_arg_path "workspace path" "$WORKSPACE"
+
+  case "$WORKSPACE_MODE" in
+    rw|ro) ;;
+    *) die "workspace mode must be rw or ro" ;;
+  esac
+
+  case "$NETWORK_MODE" in
+    proxy)
+      PROXY_MODE=nonlocal
+      ;;
+    openai)
+      PROXY_MODE=openai
+      ;;
+    none)
+      ;;
+    bridge)
+      [[ "$ALLOW_BRIDGE_NETWORK" == 1 ]] || die "--network bridge bypasses the proxy; pass --allow-bridge-network to confirm"
+      ;;
+    *)
+      die "unknown network mode: $NETWORK_MODE"
+      ;;
+  esac
+
+  ensure_image
+  case "$NETWORK_MODE" in
+    proxy|openai)
+      ensure_proxy_image
+      ;;
+  esac
+
+  if engine_has_container "$name"; then
+    "$ENGINE" rm "$name" >/dev/null
+  fi
+
+  ensure_state_volume "$volume"
+
+  case "$NETWORK_MODE" in
+    proxy|openai)
+      proxy_start
+      ;;
+  esac
+
+  local args=()
+  while IFS= read -r -d '' arg; do args+=("$arg"); done < <(runtime_security_args)
+  while IFS= read -r -d '' arg; do args+=("$arg"); done < <(user_args)
+
+  local workspace_mount="type=bind,src=$WORKSPACE,dst=/workspace"
+  if [[ "$WORKSPACE_MODE" == ro ]]; then
+    workspace_mount+=",readonly"
+  fi
+
+  args+=(
+    --rm
+    -it
+    --name "$name"
+    --label org.safe-codex.role=codex
+    --label "org.safe-codex.profile=$PROFILE"
+    --hostname safe-codex
+    --workdir /workspace
+    --tmpfs "$(home_tmpfs_spec)"
+    --mount "$(volume_mount_spec "$volume" /home/codex/.codex)"
+    --mount "$workspace_mount"
+    -e HOME=/home/codex
+    -e TERM="${TERM:-xterm-256color}"
+  )
+
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    args+=(-e OPENAI_API_KEY)
+  fi
+
+  if [[ -n "$ENV_FILE" ]]; then
+    [[ -f "$ENV_FILE" ]] || die "env file does not exist: $ENV_FILE"
+    args+=(--env-file "$ENV_FILE")
+  fi
+
+  local parsed src dst
+  for spec in "${RW_MOUNTS[@]}"; do
+    parsed="$(parse_mount_spec "$spec" /mnt/rw)"
+    src="${parsed%%:*}"
+    dst="${parsed#*:}"
+    args+=(--mount "type=bind,src=$src,dst=$dst")
+  done
+  for spec in "${RO_MOUNTS[@]}"; do
+    parsed="$(parse_mount_spec "$spec" /mnt/ro)"
+    src="${parsed%%:*}"
+    dst="${parsed#*:}"
+    args+=(--mount "type=bind,src=$src,dst=$dst,readonly")
+  done
+
+  case "$NETWORK_MODE" in
+    proxy|openai)
+      args+=(
+        --network "$(network_name)"
+        -e HTTP_PROXY=http://$(proxy_name):3128
+        -e HTTPS_PROXY=http://$(proxy_name):3128
+        -e ALL_PROXY=http://$(proxy_name):3128
+        -e http_proxy=http://$(proxy_name):3128
+        -e https_proxy=http://$(proxy_name):3128
+        -e all_proxy=http://$(proxy_name):3128
+        -e NO_PROXY=localhost,127.0.0.1,::1
+        -e no_proxy=localhost,127.0.0.1,::1
+      )
+      ;;
+    none)
+      args+=(--network none)
+      ;;
+    bridge)
+      ;;
+  esac
+
+  if [[ "$entrypoint" == "shell" ]]; then
+    args+=(--entrypoint /bin/bash)
+  fi
+
+  exec "$ENGINE" run "${args[@]}" "$IMAGE" "${CMD_ARGS[@]}"
+}
+
+build_images() {
+  local codex_version="${SAFE_CODEX_VERSION:-0.130.0}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --codex-version)
+        [[ $# -ge 2 ]] || die "--codex-version requires a value"
+        codex_version="$2"; shift 2 ;;
+      *)
+        die "unknown build option: $1" ;;
+    esac
+  done
+  "$ENGINE" build --pull -f "$ROOT_DIR/Containerfile" \
+    --build-arg "CODEX_VERSION=$codex_version" \
+    -t "$IMAGE" "$ROOT_DIR"
+  "$ENGINE" build --pull -f "$ROOT_DIR/Containerfile.proxy" \
+    -t "$PROXY_IMAGE" "$ROOT_DIR"
+}
+
+attach_container() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile)
+        [[ $# -ge 2 ]] || die "--profile requires a value"
+        PROFILE="$2"; shift 2 ;;
+      --name)
+        [[ $# -ge 2 ]] || die "--name requires a value"
+        CONTAINER_NAME="$2"; shift 2 ;;
+      *) die "unknown attach option: $1" ;;
+    esac
+  done
+  local name
+  name="$(container_name)"
+  engine_has_container "$name" || die "container does not exist: $name"
+  engine_container_running "$name" || die "container is not running: $name"
+  exec "$ENGINE" attach "$name"
+}
+
+stop_container() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile)
+        [[ $# -ge 2 ]] || die "--profile requires a value"
+        PROFILE="$2"; shift 2 ;;
+      --name)
+        [[ $# -ge 2 ]] || die "--name requires a value"
+        CONTAINER_NAME="$2"; shift 2 ;;
+      *) die "unknown stop option: $1" ;;
+    esac
+  done
+  local name
+  name="$(container_name)"
+  if engine_has_container "$name"; then
+    "$ENGINE" stop "$name" >/dev/null || true
+  fi
+}
+
+rm_container() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile)
+        [[ $# -ge 2 ]] || die "--profile requires a value"
+        PROFILE="$2"; shift 2 ;;
+      --name)
+        [[ $# -ge 2 ]] || die "--name requires a value"
+        CONTAINER_NAME="$2"; shift 2 ;;
+      *) die "unknown rm option: $1" ;;
+    esac
+  done
+  local name
+  name="$(container_name)"
+  if engine_has_container "$name"; then
+    "$ENGINE" rm -f "$name" >/dev/null || true
+  fi
+}
+
+status_all() {
+  local items
+  printf 'engine: %s\n' "$ENGINE"
+  printf 'codex image: %s ' "$IMAGE"
+  engine_has_image "$IMAGE" && printf '(present)\n' || printf '(missing)\n'
+  printf 'proxy image: %s ' "$PROXY_IMAGE"
+  engine_has_image "$PROXY_IMAGE" && printf '(present)\n' || printf '(missing)\n'
+  "$ENGINE" ps -a --filter 'name=^/safe-codex' || true
+  items="$("$ENGINE" volume ls --filter 'name=safe-codex-state' --format '{{.Name}}' 2>/dev/null || true)"
+  if [[ -n "$items" ]]; then
+    printf 'state volumes:\n%s\n' "$items"
+  fi
+  items="$("$ENGINE" volume ls --filter 'name=safe-codex-home' --format '{{.Name}}' 2>/dev/null || true)"
+  if [[ -n "$items" ]]; then
+    printf 'legacy home volumes:\n%s\n' "$items"
+  fi
+  items="$("$ENGINE" network ls --filter 'name=safe-codex-' --format '{{.Name}}' 2>/dev/null || true)"
+  if [[ -n "$items" ]]; then
+    printf 'networks:\n%s\n' "$items"
+  fi
+}
+
+list_profiles() {
+  local volumes ids id name profile status
+  printf 'state volumes:\n'
+  volumes="$("$ENGINE" volume ls --filter 'name=safe-codex-state-' --format '{{.Name}}' 2>/dev/null || true)"
+  if [[ -n "$volumes" ]]; then
+    printf '%s\n' "$volumes" | sort | while IFS= read -r volume; do
+      [[ -n "$volume" ]] || continue
+      printf '  %s\n' "${volume#safe-codex-state-}"
+    done
+  else
+    printf '  (none)\n'
+  fi
+
+  printf 'codex containers:\n'
+  ids="$("$ENGINE" ps -a --filter 'label=org.safe-codex.role=codex' --format '{{.ID}}' 2>/dev/null || true)"
+  if [[ -n "$ids" ]]; then
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      name="$("$ENGINE" inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##' || true)"
+      profile="$(engine_container_label "$id" org.safe-codex.profile)"
+      status="$("$ENGINE" inspect -f '{{.State.Status}}' "$id" 2>/dev/null || true)"
+      printf '  %s\tprofile=%s\tstatus=%s\n' "${name:-$id}" "${profile:-unknown}" "${status:-unknown}"
+    done <<< "$ids"
+  else
+    printf '  (none)\n'
+  fi
+}
+
+doctor() {
+  local engine_ok workspace_real config_ok=1 missing=0 security_options
+  printf 'safe-codex doctor\n'
+  printf 'engine: %s\n' "$ENGINE"
+  if "$ENGINE" --version >/dev/null 2>&1; then
+    printf 'engine version: %s\n' "$("$ENGINE" --version)"
+  else
+    printf 'engine version: unavailable\n'
+  fi
+
+  if "$ENGINE" info >/dev/null 2>&1; then
+    engine_ok=1
+    printf 'engine status: reachable\n'
+  else
+    engine_ok=0
+    printf 'engine status: not reachable\n'
+  fi
+
+  if [[ "$ENGINE" == docker ]]; then
+    security_options="$("$ENGINE" info --format '{{range .SecurityOptions}}{{.}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    if printf '%s\n' "$security_options" | grep -qi rootless; then
+      printf 'engine isolation: docker rootless\n'
+    elif id -nG | tr ' ' '\n' | grep -Fxq docker; then
+      printf 'engine isolation: docker group grants root-equivalent host control\n'
+    else
+      printf 'engine isolation: docker, current user not in docker group\n'
+    fi
+  elif [[ "$ENGINE" == podman ]]; then
+    printf 'engine isolation: podman%s\n' "$(id -u | grep -qx 0 && printf ' as root' || printf ' rootless user')"
+  fi
+
+  printf 'codex image: %s ' "$IMAGE"
+  if [[ "$engine_ok" == 1 ]] && engine_has_image "$IMAGE"; then
+    printf '(present)\n'
+  else
+    printf '(missing)\n'
+    missing=1
+  fi
+
+  printf 'proxy image: %s ' "$PROXY_IMAGE"
+  if [[ "$engine_ok" == 1 ]] && engine_has_image "$PROXY_IMAGE"; then
+    printf '(present)\n'
+  else
+    printf '(missing)\n'
+    missing=1
+  fi
+
+  if [[ -f "$ROOT_DIR/.env" ]]; then
+    printf '.env: present; parsed as restricted KEY=VALUE, not sourced\n'
+  else
+    printf '.env: absent\n'
+  fi
+
+  if workspace_real="$(realpath -e -- "$WORKSPACE" 2>/dev/null)"; then
+    printf 'default workspace: %s (%s)\n' "$workspace_real" "$WORKSPACE_MODE"
+  else
+    printf 'default workspace: %s (missing, %s)\n' "$WORKSPACE" "$WORKSPACE_MODE"
+  fi
+
+  case "$WORKSPACE_MODE" in
+    rw|ro) ;;
+    *)
+      printf 'workspace mode: invalid, expected rw or ro\n'
+      config_ok=0
+      ;;
+  esac
+
+  case "$NETWORK_MODE" in
+    proxy)
+      printf 'default network: proxy via nonlocal destination filter\n' ;;
+    openai)
+      printf 'default network: openai allowlist proxy\n' ;;
+    none)
+      printf 'default network: none\n' ;;
+    bridge)
+      printf 'default network: bridge; run still requires --allow-bridge-network\n' ;;
+    *)
+      printf 'default network: invalid, expected proxy, openai, none, or bridge\n'
+      config_ok=0
+      ;;
+  esac
+
+  if [[ "$engine_ok" != 1 || "$config_ok" != 1 ]]; then
+    printf 'run readiness: not ready\n'
+  elif [[ "$missing" == 1 ]]; then
+    printf 'run readiness: build required\n'
+    printf 'next build command: %s --engine %s build\n' "$0" "$ENGINE"
+  else
+    printf 'run readiness: ready\n'
+  fi
+
+  [[ "$engine_ok" == 1 && "$config_ok" == 1 ]]
+}
+
+case "$SUBCOMMAND" in
+  build)
+    build_images "$@"
+    ;;
+  run)
+    run_container codex "$@"
+    ;;
+  shell)
+    run_container shell "$@"
+    ;;
+  attach)
+    attach_container "$@"
+    ;;
+  stop)
+    stop_container "$@"
+    ;;
+  rm)
+    rm_container "$@"
+    ;;
+  proxy)
+    parse_proxy_command "$@"
+    ;;
+  profiles)
+    list_profiles
+    ;;
+  doctor)
+    doctor
+    ;;
+  status)
+    status_all
+    ;;
+  --help|-h|help)
+    usage
+    ;;
+  *)
+    die "unknown subcommand: $SUBCOMMAND"
+    ;;
+esac
