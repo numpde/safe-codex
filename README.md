@@ -8,7 +8,7 @@ The launcher keeps Codex state in an engine-managed volume, avoids mounting host
 routes default network access through a proxy that blocks local/private
 destinations.
 
-Full documentation is in [index.html](index.html).
+Full documentation is published at <https://numpde.github.io/safe-codex/>.
 
 Common commands:
 
