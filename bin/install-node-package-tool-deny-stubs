@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  install-node-package-tool-deny-stubs [options]
+
+Installs host deny stubs for npm, npx, and corepack while keeping node-based
+tools such as Codex available. The script also installs helper commands that
+strip npm/npx/corepack from nvm-managed Node prefixes and verify the state.
+
+Options:
+  --rc-file PATH   Shell startup file to update. Default: ~/.bashrc.
+  --no-rc          Do not edit a shell startup file.
+  --no-strip       Do not strip existing nvm Node prefixes now.
+  --dry-run        Print what would be done without changing files.
+  -h, --help       Show this help.
+
+Installed commands:
+  ~/.local/bin/npm
+  ~/.local/bin/npx
+  ~/.local/bin/corepack
+  ~/.local/bin/strip-node-package-tools
+  ~/.local/bin/check-node-package-tools-disabled
+EOF
+}
+
+die() {
+  printf 'install-node-package-tool-deny-stubs: %s\n' "$*" >&2
+  exit 1
+}
+
+home_dir="${HOME:?HOME is not set}"
+local_bin="$home_dir/.local/bin"
+quarantine_root="$home_dir/.quarantine"
+rc_file="$home_dir/.bashrc"
+edit_rc=1
+strip_now=1
+dry_run=0
+
+if [[ "${EUID:-$(id -u)}" == 0 && "${SAFE_CODEX_ALLOW_ROOT_INSTALL:-}" != 1 ]]; then
+  die "refusing to install per-user stubs as root; rerun as the target user or set SAFE_CODEX_ALLOW_ROOT_INSTALL=1"
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rc-file)
+      [[ $# -ge 2 ]] || die "--rc-file requires a path"
+      rc_file="$2"
+      shift 2
+      ;;
+    --no-rc)
+      edit_rc=0
+      shift
+      ;;
+    --no-strip)
+      strip_now=0
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+run() {
+  if [[ "$dry_run" == 1 ]]; then
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+write_file() {
+  local path="$1"
+  local mode="$2"
+  local tmp
+
+  if [[ "$dry_run" == 1 ]]; then
+    printf '+ write %s mode %s\n' "$path" "$mode"
+    cat >/dev/null
+    return
+  fi
+
+  tmp="$(mktemp "$path.tmp.XXXXXX")"
+  cat >"$tmp"
+  chmod "$mode" "$tmp"
+  mv "$tmp" "$path"
+}
+
+backup_existing_target() {
+  local path="$1"
+  local name
+  local backup_dir
+
+  [[ -e "$path" || -L "$path" ]] || return 0
+
+  if grep -q "safe-codex managed deny stub" "$path" 2>/dev/null; then
+    return 0
+  fi
+
+  name="$(basename "$path")"
+
+  if [[ "$dry_run" == 1 ]]; then
+    printf '+ backup existing %s under %s\n' "$path" "$quarantine_root"
+    return 0
+  fi
+
+  backup_dir="$(mktemp -d "$quarantine_root/local-bin-$name-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+  mv "$path" "$backup_dir/"
+  printf 'backed up existing %s to %s/\n' "$path" "$backup_dir"
+}
+
+install_deny_stub() {
+  local name="$1"
+  backup_existing_target "$local_bin/$name"
+  write_file "$local_bin/$name" 700 <<EOF
+#!/usr/bin/env bash
+# safe-codex managed deny stub
+printf '%s is disabled on this host. Use a containerized build environment instead.\n' "$name" >&2
+exit 127
+EOF
+}
+
+install_strip_script() {
+  write_file "$local_bin/strip-node-package-tools" 700 <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+quarantine_root="$HOME/.quarantine"
+mkdir -p "$quarantine_root"
+
+for prefix in "$HOME"/.nvm/versions/node/v*/; do
+  [ -d "$prefix" ] || continue
+  prefix="${prefix%/}"
+
+  quarantine="$(mktemp -d "$quarantine_root/$(basename "$prefix")-package-tools-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+  moved=0
+
+  mkdir -p "$quarantine/bin" "$quarantine/lib-node-modules"
+
+  for name in npm npx corepack; do
+    if [ -e "$prefix/bin/$name" ] || [ -L "$prefix/bin/$name" ]; then
+      mv "$prefix/bin/$name" "$quarantine/bin/"
+      moved=1
+    fi
+  done
+
+  for name in npm corepack; do
+    if [ -e "$prefix/lib/node_modules/$name" ]; then
+      mv "$prefix/lib/node_modules/$name" "$quarantine/lib-node-modules/"
+      moved=1
+    fi
+  done
+
+  if [ "$moved" = 1 ]; then
+    printf 'stripped npm/npx/corepack from %s -> %s\n' "$prefix" "$quarantine"
+  else
+    rmdir "$quarantine/bin" "$quarantine/lib-node-modules" "$quarantine" 2>/dev/null || true
+  fi
+done
+
+hash -r 2>/dev/null || true
+EOF
+}
+
+install_check_script() {
+  write_file "$local_bin/check-node-package-tools-disabled" 700 <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+failed=0
+
+for name in npm npx corepack; do
+  path="$(command -v "$name" 2>/dev/null || true)"
+  case "$path" in
+    "$HOME/.local/bin/$name")
+      printf '%s disabled via %s\n' "$name" "$path"
+      ;;
+    "")
+      printf '%s absent\n' "$name"
+      ;;
+    *)
+      printf '%s is unexpectedly active at %s\n' "$name" "$path" >&2
+      failed=1
+      ;;
+  esac
+done
+
+for prefix in "$HOME"/.nvm/versions/node/v*/; do
+  [ -d "$prefix" ] || continue
+  for path in \
+    "$prefix/bin/npm" \
+    "$prefix/bin/npx" \
+    "$prefix/bin/corepack" \
+    "$prefix/lib/node_modules/npm" \
+    "$prefix/lib/node_modules/corepack"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      printf 'package tool still present: %s\n' "$path" >&2
+      failed=1
+    fi
+  done
+done
+
+exit "$failed"
+EOF
+}
+
+install_rc_block() {
+  local begin="# >>> safe-codex disable host npm/npx/corepack >>>"
+  local end="# <<< safe-codex disable host npm/npx/corepack <<<"
+  local tmp
+
+  [[ "$edit_rc" == 1 ]] || return 0
+
+  if [[ "$dry_run" == 1 ]]; then
+    printf '+ update rc block in %s\n' "$rc_file"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$rc_file")"
+  touch "$rc_file"
+  tmp="$(mktemp "$rc_file.tmp.XXXXXX")"
+
+  awk -v begin="$begin" -v end="$end" '
+    $0 == begin { skip = 1; next }
+    $0 == end { skip = 0; next }
+    skip != 1 { print }
+  ' "$rc_file" >"$tmp"
+
+  cat >>"$tmp" <<'EOF'
+
+# >>> safe-codex disable host npm/npx/corepack >>>
+# Keep node-based tools available, but route npm/npx/corepack to local deny
+# stubs and strip package-manager entrypoints after nvm changes Node versions.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+strip-node-package-tools >/dev/null 2>&1 || true
+if type nvm >/dev/null 2>&1 && ! type __safe_codex_original_nvm >/dev/null 2>&1; then
+  eval "$(declare -f nvm | sed '1s/^nvm /__safe_codex_original_nvm /')"
+  nvm() {
+    __safe_codex_original_nvm "$@"
+    local status=$?
+    case "${1:-}" in
+      install|reinstall|upgrade|use|alias|unalias)
+        "$HOME/.local/bin/strip-node-package-tools" >/dev/null 2>&1 || true
+        case ":$PATH:" in
+          *":$HOME/.local/bin:"*) ;;
+          *) export PATH="$HOME/.local/bin:$PATH" ;;
+        esac
+        hash -r 2>/dev/null || true
+        ;;
+    esac
+    return "$status"
+  }
+fi
+# <<< safe-codex disable host npm/npx/corepack <<<
+EOF
+
+  mv "$tmp" "$rc_file"
+}
+
+run mkdir -p "$local_bin" "$quarantine_root"
+run chmod 700 "$local_bin" "$quarantine_root"
+
+install_deny_stub npm
+install_deny_stub npx
+install_deny_stub corepack
+install_strip_script
+install_check_script
+install_rc_block
+
+if [[ "$dry_run" != 1 ]]; then
+  case ":$PATH:" in
+    *":$local_bin:"*) ;;
+    *) export PATH="$local_bin:$PATH" ;;
+  esac
+  hash -r 2>/dev/null || true
+fi
+
+if [[ "$strip_now" == 1 ]]; then
+  run "$local_bin/strip-node-package-tools"
+fi
+
+if [[ "$dry_run" != 1 ]]; then
+  "$local_bin/check-node-package-tools-disabled"
+  cat <<EOF
+
+Installed host npm/npx/corepack deny stubs.
+
+Open a new shell, or run:
+  export PATH="\$HOME/.local/bin:\$PATH"
+  hash -r
+
+Verify any time with:
+  check-node-package-tools-disabled
+EOF
+fi
