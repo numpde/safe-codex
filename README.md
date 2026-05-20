@@ -10,7 +10,7 @@ destinations.
 
 Full documentation is published at <https://numpde.github.io/safe-codex/>.
 
-Common commands:
+## Quick start
 
 ```bash
 ./bin/safe-codex-podman doctor
@@ -25,22 +25,24 @@ GPU devices are not exposed by default. Use `--gpu nvidia` for all NVIDIA GPUs,
 `--gpu nvidia:0` or `--gpu nvidia:0,1` for selected NVIDIA GPUs, or
 `--gpu dri:/dev/dri/renderDNNN` for an explicit DRI render node.
 
-Optional host guard, for keeping host `node` and Codex available while blocking
-normal `npm`, `npx`, and `corepack` use:
+## Optional host helpers
+
+Keep host `node` and Codex available while blocking normal `npm`, `npx`, and
+`corepack` use:
 
 ```bash
 ./bin/install-node-package-tool-deny-stubs --dry-run
 ./bin/install-node-package-tool-deny-stubs
 ```
 
-Install native Codex without npm/npx/corepack:
+Install native Codex without `npm`, `npx`, `corepack`, `nvm`, or `node`:
 
 ```bash
 ./bin/install-native-codex-cli --dry-run --version 0.130.0
 ./bin/install-native-codex-cli --version 0.130.0
 ```
 
-Run checks:
+## Checks
 
 ```bash
 ./bin/check

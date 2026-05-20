@@ -281,7 +281,7 @@
             <tr><td><code>Containerfile.proxy</code></td><td>Squid proxy image.</td></tr>
             <tr><td><code>proxy/squid-nonlocal.conf</code></td><td>Default egress policy: Internet allowed, local/private IP destinations blocked.</td></tr>
             <tr><td><code>proxy/squid-openai.conf</code></td><td>Stricter egress policy for OpenAI/ChatGPT domains.</td></tr>
-            <tr><td><code>bin/safe-codex</code></td><td>Launcher for Podman or Docker.</td></tr>
+            <tr><td><code>bin/safe-codex</code></td><td>Shared launcher used by the Podman and Docker wrappers.</td></tr>
             <tr><td><code>bin/install-native-codex-cli</code></td><td>Optional host helper that installs the native Codex CLI payload without invoking <code>npm</code>, <code>npx</code>, <code>corepack</code>, <code>nvm</code>, or <code>node</code>.</td></tr>
             <tr><td><code>bin/install-node-package-tool-deny-stubs</code></td><td>Optional host helper that disables normal <code>npm</code>, <code>npx</code>, and <code>corepack</code> use while leaving <code>node</code> available.</td></tr>
             <tr><td><code>bin/check</code></td><td>Non-invasive syntax and Dockerfile checks.</td></tr>
@@ -371,6 +371,24 @@
           <li>GPU devices: none.</li>
           <li>Lifecycle: Codex containers are removed on exit; state persists in the named volume.</li>
         </ul>
+
+        <h3>Common options</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Option</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>--profile NAME</code></td><td>Use a separate persistent Codex state volume and container name.</td></tr>
+            <tr><td><code>--workspace PATH</code></td><td>Mount a specific project at <code>/workspace</code>.</td></tr>
+            <tr><td><code>--workspace-ro</code> or <code>--workspace-rw</code></td><td>Choose whether the workspace bind mount is read-only or writable.</td></tr>
+            <tr><td><code>--network proxy</code>, <code>openai</code>, or <code>none</code></td><td>Choose the egress policy for the run.</td></tr>
+            <tr><td><code>--gpu nvidia</code> or <code>--gpu dri:/dev/dri/renderDNNN</code></td><td>Expose GPU devices explicitly. The default is no GPU access.</td></tr>
+            <tr><td><code>--ro SRC[:DST]</code> or <code>--rw SRC[:DST]</code></td><td>Add a narrow extra mount without exposing the host home or broad system paths.</td></tr>
+          </tbody>
+        </table>
 
         <p>For a read-only-by-default workflow, set <code>SAFE_CODEX_WORKSPACE_MODE=ro</code> in <code>.env</code>, then pass <code>--workspace-rw</code> only when a run should edit the workspace.</p>
 
@@ -539,22 +557,29 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
   --gpu nvidia:0,1
 
 /path/to/safe-codex/bin/safe-codex-podman run \
-  --gpu nvidia:GPU-75078110-7bdd-beaa-2195-2ba33a555cd7</code></pre>
+  --gpu nvidia:GPU-01234567-89ab-cdef-0123-456789abcdef</code></pre>
 
-        <p>With Podman, NVIDIA mode uses CDI devices such as <code>nvidia.com/gpu=all</code>. With Docker, it uses Docker's <code>--gpus</code> flag.</p>
+        <p>With Podman, NVIDIA mode uses CDI devices such as <code>nvidia.com/gpu=all</code>. With Docker, it uses Docker's <code>--gpus</code> flag. The host still needs working NVIDIA container support.</p>
 
         <p>Expose one explicit DRI render node for an AMD or Intel iGPU:</p>
         <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
-  --gpu dri:/dev/dri/by-path/pci-0000:7a:00.0-render</code></pre>
+  --gpu dri:/dev/dri/renderD128
+
+/path/to/safe-codex/bin/safe-codex-podman run \
+  --gpu dri:/dev/dri/by-path/pci-0000:00:02.0-render</code></pre>
+
+        <p>Find stable render-node names on the host:</p>
+        <pre><code>ls -l /dev/dri/by-path/*-render</code></pre>
+        <p>Use the actual path from that listing for <code>--gpu dri:...</code> or <code>SAFE_CODEX_AMD_IGPU_RENDER</code>.</p>
 
         <p>The DRI mode resolves symlinks and accepts only <code>/dev/dri/renderD*</code> character devices. The launcher also requires the current host user to be able to read and write the render node before starting the container. On many systems that means adding the user to the <code>render</code> group and starting a new login session.</p>
 
         <p>If you want a named iGPU default in <code>.env</code>, set:</p>
         <pre><code>SAFE_CODEX_GPU=amd-igpu
-SAFE_CODEX_AMD_IGPU_RENDER=/dev/dri/by-path/pci-0000:7a:00.0-render</code></pre>
+SAFE_CODEX_AMD_IGPU_RENDER=/dev/dri/by-path/pci-0000:00:02.0-render</code></pre>
 
         <div class="callout">
-          <p>GPU mode only exposes devices. The runtime image still needs the userspace libraries, drivers, Python environment, or other stack required by the workload.</p>
+          <p>GPU mode weakens containment by exposing host device files. It only exposes devices; the runtime image still needs the userspace libraries, drivers, Python environment, or other stack required by the workload.</p>
         </div>
       </section>
 
