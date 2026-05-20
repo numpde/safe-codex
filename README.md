@@ -17,8 +17,13 @@ Common commands:
 ./bin/safe-codex-podman build
 ./bin/safe-codex-podman run
 ./bin/safe-codex-podman run --workspace-ro --network openai --profile cautious
+./bin/safe-codex-podman run --gpu nvidia --profile gpu
 ./bin/safe-codex-podman profiles
 ```
+
+GPU devices are not exposed by default. Use `--gpu nvidia` for all NVIDIA GPUs,
+`--gpu nvidia:0` or `--gpu nvidia:0,1` for selected NVIDIA GPUs, or
+`--gpu dri:/dev/dri/renderDNNN` for an explicit DRI render node.
 
 Optional host guard, for keeping host `node` and Codex available while blocking
 normal `npm`, `npx`, and `corepack` use:

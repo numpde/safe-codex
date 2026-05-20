@@ -230,6 +230,7 @@
       <a href="#profiles">Profiles</a>
       <a href="#multiple-sessions">Multiple sessions</a>
       <a href="#mounts">Mounts</a>
+      <a href="#gpu">GPU devices</a>
       <a href="#network">Network</a>
       <a href="#auth">Authentication</a>
       <a href="#maintenance">Maintenance</a>
@@ -367,6 +368,7 @@
           <li>Persistent state: <code>safe-codex-state-default</code> mounted at <code>/home/codex/.codex</code>.</li>
           <li>Nonpersistent home: <code>/home/codex</code> tmpfs with <code>noexec</code>.</li>
           <li>Network: <code>proxy</code>, using <code>safe-codex-proxy-nonlocal</code>.</li>
+          <li>GPU devices: none.</li>
           <li>Lifecycle: Codex containers are removed on exit; state persists in the named volume.</li>
         </ul>
 
@@ -519,6 +521,41 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
 
         <p>Override these checks only with a concrete reason:</p>
         <pre><code>--allow-risky-mounts</code></pre>
+      </section>
+
+      <section id="gpu">
+        <h2>GPU devices</h2>
+        <p>GPU access is opt-in. The default run exposes no NVIDIA devices, no DRI render nodes, and no broad <code>/dev</code> mount.</p>
+
+        <p>Expose all NVIDIA GPUs:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --gpu nvidia</code></pre>
+
+        <p>Expose one or more NVIDIA GPUs by index or UUID:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --gpu nvidia:0
+
+/path/to/safe-codex/bin/safe-codex-podman run \
+  --gpu nvidia:0,1
+
+/path/to/safe-codex/bin/safe-codex-podman run \
+  --gpu nvidia:GPU-75078110-7bdd-beaa-2195-2ba33a555cd7</code></pre>
+
+        <p>With Podman, NVIDIA mode uses CDI devices such as <code>nvidia.com/gpu=all</code>. With Docker, it uses Docker's <code>--gpus</code> flag.</p>
+
+        <p>Expose one explicit DRI render node for an AMD or Intel iGPU:</p>
+        <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
+  --gpu dri:/dev/dri/by-path/pci-0000:7a:00.0-render</code></pre>
+
+        <p>The DRI mode resolves symlinks and accepts only <code>/dev/dri/renderD*</code> character devices. The launcher also requires the current host user to be able to read and write the render node before starting the container. On many systems that means adding the user to the <code>render</code> group and starting a new login session.</p>
+
+        <p>If you want a named iGPU default in <code>.env</code>, set:</p>
+        <pre><code>SAFE_CODEX_GPU=amd-igpu
+SAFE_CODEX_AMD_IGPU_RENDER=/dev/dri/by-path/pci-0000:7a:00.0-render</code></pre>
+
+        <div class="callout">
+          <p>GPU mode only exposes devices. The runtime image still needs the userspace libraries, drivers, Python environment, or other stack required by the workload.</p>
+        </div>
       </section>
 
       <section id="network">

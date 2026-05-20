@@ -72,6 +72,9 @@ Run options:
   --ro SRC[:DST]          Add a read-only bind mount.
   --network MODE          proxy, openai, none, or bridge. Default: proxy.
   --env-file PATH         Pass an env file to the container.
+  --gpu MODE              Expose GPU devices. Default: none.
+                          Modes: none, nvidia, nvidia:SELECTOR, dri:PATH,
+                          amd-igpu.
   --name NAME             Override the container name.
   --memory VALUE          Default: 2g.
   --cpus VALUE            Default: 2.
@@ -84,6 +87,11 @@ Notes:
   - Default network is proxy: Codex gets Internet via a Squid proxy that blocks
     local/private destinations.
   - openai network is stricter: only OpenAI/ChatGPT domains are allowed.
+  - GPU devices are never exposed unless --gpu is passed or SAFE_CODEX_GPU is set.
+  - nvidia is shorthand for nvidia:all. SELECTOR may be all, a numeric GPU
+    index, a GPU UUID, or comma-separated numeric/UUID selectors.
+  - dri:PATH exposes one /dev/dri render node. amd-igpu uses
+    SAFE_CODEX_AMD_IGPU_RENDER and fails if that variable is unset.
   - Profile names may contain only letters, numbers, dot, underscore, and dash.
   - Do not mount host ~/.codex. The container uses a named persistent volume.
 EOF
@@ -133,6 +141,7 @@ NETWORK_MODE="${SAFE_CODEX_NETWORK:-proxy}"
 PROXY_MODE="${SAFE_CODEX_PROXY_MODE:-nonlocal}"
 WORKSPACE="${SAFE_CODEX_WORKSPACE:-$PWD}"
 WORKSPACE_MODE="${SAFE_CODEX_WORKSPACE_MODE:-rw}"
+GPU_MODE="${SAFE_CODEX_GPU:-none}"
 MEMORY="${SAFE_CODEX_MEMORY:-2g}"
 CPUS="${SAFE_CODEX_CPUS:-2}"
 PIDS_LIMIT="${SAFE_CODEX_PIDS_LIMIT:-512}"
@@ -143,6 +152,7 @@ ALLOW_BRIDGE_NETWORK=0
 RW_MOUNTS=()
 RO_MOUNTS=()
 CMD_ARGS=()
+GPU_RUN_ARGS=()
 
 safe_name() {
   printf '%s' "$1" | tr -c '[:alnum:]_.-' '-'
@@ -373,6 +383,115 @@ parse_mount_spec() {
   printf '%s:%s\n' "$src" "$dst"
 }
 
+validate_nvidia_selector() {
+  local selector="$1"
+  local part
+  local -a parts
+  [[ -n "$selector" ]] || die "NVIDIA GPU selector cannot be empty"
+
+  IFS=',' read -ra parts <<< "$selector"
+  for part in "${parts[@]}"; do
+    [[ -n "$part" ]] || die "NVIDIA GPU selector contains an empty entry: $selector"
+    case "$part" in
+      all)
+        [[ "$selector" == all ]] || die "NVIDIA selector 'all' cannot be combined with other selectors"
+        ;;
+      GPU-*)
+        [[ "$part" =~ ^GPU-[A-Za-z0-9-]+$ ]] || die "invalid NVIDIA GPU UUID selector: $part"
+        ;;
+      *)
+        [[ "$part" =~ ^[0-9]+$ ]] || die "invalid NVIDIA GPU selector: $part"
+        ;;
+    esac
+  done
+}
+
+validate_dri_render_device() {
+  local device="$1"
+  local resolved
+  [[ -n "$device" ]] || die "DRI render device path cannot be empty"
+  case "$device" in
+    *","*|*$'\n'*)
+      die "DRI render device path contains an unsupported character: $device"
+      ;;
+  esac
+  [[ -e "$device" ]] || die "DRI render device does not exist: $device"
+  resolved="$(realpath -e -- "$device")"
+  [[ "$resolved" =~ ^/dev/dri/renderD[0-9]+$ ]] || die "DRI GPU mode accepts only /dev/dri/renderD* nodes, got: $resolved"
+  [[ -c "$resolved" ]] || die "DRI render device is not a character device: $resolved"
+  if [[ ! -r "$resolved" || ! -w "$resolved" ]]; then
+    die "current user cannot read/write $resolved; add the user to the render group, start a new login session, then retry"
+  fi
+  printf '%s\n' "$resolved"
+}
+
+append_dri_gpu_args() {
+  local device="$1"
+  local gid
+
+  device="$(validate_dri_render_device "$device")"
+  GPU_RUN_ARGS+=(--device "$device")
+  if [[ "$ENGINE" == docker ]]; then
+    gid="$(stat -c %g "$device")"
+    GPU_RUN_ARGS+=(--group-add "$gid")
+  elif [[ "$ENGINE" == podman ]]; then
+    GPU_RUN_ARGS+=(--group-add keep-groups)
+  fi
+}
+
+append_gpu_args() {
+  local mode="$GPU_MODE"
+  local selector part
+  local -a parts
+
+  case "$mode" in
+    ""|none)
+      return 0
+      ;;
+    nvidia)
+      selector=all
+      validate_nvidia_selector "$selector"
+      ;;
+    nvidia:*)
+      selector="${mode#nvidia:}"
+      validate_nvidia_selector "$selector"
+      ;;
+    dri:*)
+      append_dri_gpu_args "${mode#dri:}"
+      return 0
+      ;;
+    amd-igpu)
+      [[ -n "${SAFE_CODEX_AMD_IGPU_RENDER:-}" ]] || die "--gpu amd-igpu requires SAFE_CODEX_AMD_IGPU_RENDER=/dev/dri/by-path/...-render or use --gpu dri:/dev/dri/renderDNNN"
+      append_dri_gpu_args "$SAFE_CODEX_AMD_IGPU_RENDER"
+      return 0
+      ;;
+    *)
+      die "unknown GPU mode: $mode"
+      ;;
+  esac
+
+  if [[ "$ENGINE" == podman ]]; then
+    if [[ "$selector" == all ]]; then
+      GPU_RUN_ARGS+=(--device nvidia.com/gpu=all)
+    else
+      IFS=',' read -ra parts <<< "$selector"
+      for part in "${parts[@]}"; do
+        GPU_RUN_ARGS+=(--device "nvidia.com/gpu=$part")
+      done
+    fi
+  else
+    if [[ "$selector" == all ]]; then
+      GPU_RUN_ARGS+=(--gpus all)
+    else
+      if [[ "$selector" == *,* ]]; then
+        GPU_RUN_ARGS+=(--gpus "\"device=$selector\"")
+      else
+        GPU_RUN_ARGS+=(--gpus "device=$selector")
+      fi
+    fi
+  fi
+}
+
 runtime_security_args() {
   local args=(
     --init
@@ -565,6 +684,9 @@ parse_run_options() {
       --env-file)
         [[ $# -ge 2 ]] || die "--env-file requires a path"
         ENV_FILE="$2"; shift 2 ;;
+      --gpu)
+        [[ $# -ge 2 ]] || die "--gpu requires none, nvidia, nvidia:SELECTOR, dri:PATH, or amd-igpu"
+        GPU_MODE="$2"; shift 2 ;;
       --name)
         [[ $# -ge 2 ]] || die "--name requires a value"
         CONTAINER_NAME="$2"; shift 2 ;;
@@ -639,6 +761,9 @@ run_container() {
       ;;
   esac
 
+  GPU_RUN_ARGS=()
+  append_gpu_args
+
   ensure_image
   case "$NETWORK_MODE" in
     proxy|openai)
@@ -661,6 +786,7 @@ run_container() {
   local args=()
   while IFS= read -r -d '' arg; do args+=("$arg"); done < <(runtime_security_args)
   while IFS= read -r -d '' arg; do args+=("$arg"); done < <(user_args)
+  args+=("${GPU_RUN_ARGS[@]}")
 
   local workspace_mount="type=bind,src=$WORKSPACE,dst=/workspace"
   if [[ "$WORKSPACE_MODE" == ro ]]; then
@@ -859,7 +985,7 @@ list_profiles() {
 }
 
 doctor() {
-  local engine_ok workspace_real config_ok=1 missing=0 security_options
+  local engine_ok workspace_real config_ok=1 missing=0 security_options device
   printf 'safe-codex doctor\n'
   printf 'engine: %s\n' "$ENGINE"
   if "$ENGINE" --version >/dev/null 2>&1; then
@@ -936,6 +1062,44 @@ doctor() {
       printf 'default network: bridge; run still requires --allow-bridge-network\n' ;;
     *)
       printf 'default network: invalid, expected proxy, openai, none, or bridge\n'
+      config_ok=0
+      ;;
+  esac
+
+  case "$GPU_MODE" in
+    ""|none)
+      printf 'default gpu: none\n' ;;
+    nvidia)
+      printf 'default gpu: nvidia:all\n' ;;
+    nvidia:*)
+      if (validate_nvidia_selector "${GPU_MODE#nvidia:}") >/dev/null 2>&1; then
+        printf 'default gpu: %s\n' "$GPU_MODE"
+      else
+        printf 'default gpu: invalid NVIDIA selector in %s\n' "$GPU_MODE"
+        config_ok=0
+      fi
+      ;;
+    dri:*)
+      if device="$(validate_dri_render_device "${GPU_MODE#dri:}" 2>/dev/null)"; then
+        printf 'default gpu: dri:%s\n' "$device"
+      else
+        printf 'default gpu: DRI render node unavailable or inaccessible in %s\n' "$GPU_MODE"
+        config_ok=0
+      fi
+      ;;
+    amd-igpu)
+      if [[ -z "${SAFE_CODEX_AMD_IGPU_RENDER:-}" ]]; then
+        printf 'default gpu: amd-igpu, but SAFE_CODEX_AMD_IGPU_RENDER is unset\n'
+        config_ok=0
+      elif device="$(validate_dri_render_device "$SAFE_CODEX_AMD_IGPU_RENDER" 2>/dev/null)"; then
+        printf 'default gpu: amd-igpu via %s\n' "$device"
+      else
+        printf 'default gpu: amd-igpu render node unavailable or inaccessible: %s\n' "$SAFE_CODEX_AMD_IGPU_RENDER"
+        config_ok=0
+      fi
+      ;;
+    *)
+      printf 'default gpu: invalid, expected none, nvidia, nvidia:SELECTOR, dri:PATH, or amd-igpu\n'
       config_ok=0
       ;;
   esac
