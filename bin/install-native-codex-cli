@@ -23,6 +23,13 @@ Options:
 
 Supported platforms:
   Linux x86_64, Linux arm64, macOS x86_64, macOS arm64.
+
+Downloader environment:
+  SAFE_CODEX_DOWNLOAD_RETRIES             Default: 8.
+  SAFE_CODEX_DOWNLOAD_RETRY_DELAY         Default: 2 seconds.
+  SAFE_CODEX_DOWNLOAD_CONNECT_TIMEOUT     Default: 15 seconds.
+  SAFE_CODEX_DOWNLOAD_MAX_TIME            Default: 900 seconds.
+  SAFE_CODEX_DOWNLOAD_RETRY_MAX_TIME      Default: 300 seconds.
 EOF
 }
 
@@ -33,6 +40,15 @@ die() {
 
 need_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+validate_positive_int() {
+  local name="$1"
+  local value="$2"
+
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    die "$name must be a positive integer, got: $value"
+  fi
 }
 
 shell_quote() {
@@ -86,8 +102,139 @@ detect_platform() {
   esac
 }
 
-curl_fetch() {
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$@"
+curl_has_option() {
+  local option="$1"
+
+  curl --help all 2>/dev/null | grep -q -- "$option"
+}
+
+wget_has_option() {
+  local option="$1"
+
+  wget --help 2>/dev/null | grep -q -- "$option"
+}
+
+sleep_between_download_tools() {
+  sleep "$download_retry_delay"
+}
+
+download_with_curl() {
+  local url="$1"
+  local dest="$2"
+  local partial="$dest.partial"
+  local -a args
+
+  command -v curl >/dev/null 2>&1 || return 127
+
+  rm -f "$dest" "$partial"
+
+  args=(
+    --proto '=https'
+    --tlsv1.2
+    --fail
+    --silent
+    --show-error
+    --location
+    --connect-timeout "$download_connect_timeout"
+    --max-time "$download_max_time"
+    --retry "$download_retries"
+    --retry-delay "$download_retry_delay"
+    --retry-max-time "$download_retry_max_time"
+    --retry-connrefused
+    --output "$partial"
+  )
+
+  if curl_has_option "--retry-all-errors"; then
+    args+=(--retry-all-errors)
+  fi
+
+  if curl "${args[@]}" "$url"; then
+    [[ -s "$partial" ]] || return 1
+    mv "$partial" "$dest"
+    return 0
+  fi
+
+  rm -f "$partial"
+  return 1
+}
+
+download_with_wget() {
+  local url="$1"
+  local dest="$2"
+  local partial="$dest.partial"
+  local -a args
+
+  command -v wget >/dev/null 2>&1 || return 127
+
+  rm -f "$dest" "$partial"
+
+  args=(
+    --quiet
+    --tries="$download_retries"
+    --waitretry="$download_retry_delay"
+    --dns-timeout="$download_connect_timeout"
+    --connect-timeout="$download_connect_timeout"
+    --read-timeout="$download_max_time"
+    --retry-connrefused
+    --output-document="$partial"
+  )
+
+  if wget_has_option "--https-only"; then
+    args+=(--https-only)
+  fi
+
+  if wget_has_option "--secure-protocol"; then
+    args+=(--secure-protocol=TLSv1_2)
+  fi
+
+  if wget "${args[@]}" "$url"; then
+    [[ -s "$partial" ]] || return 1
+    mv "$partial" "$dest"
+    return 0
+  fi
+
+  rm -f "$partial"
+  return 1
+}
+
+download_url() {
+  local url="$1"
+  local dest="$2"
+  local label="$3"
+  local curl_status=127
+  local wget_status=127
+
+  case "$url" in
+    https://*) ;;
+    *) die "refusing non-HTTPS $label URL: $url" ;;
+  esac
+
+  if command -v curl >/dev/null 2>&1; then
+    printf 'downloading %s with curl\n' "$label"
+    if download_with_curl "$url" "$dest"; then
+      return 0
+    else
+      curl_status=$?
+    fi
+    printf 'curl failed for %s with status %s\n' "$label" "$curl_status" >&2
+    sleep_between_download_tools
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    printf 'downloading %s with wget\n' "$label"
+    if download_with_wget "$url" "$dest"; then
+      return 0
+    else
+      wget_status=$?
+    fi
+    printf 'wget failed for %s with status %s\n' "$label" "$wget_status" >&2
+  fi
+
+  if [[ "$curl_status" == 127 && "$wget_status" == 127 ]]; then
+    die "missing required downloader: install curl or wget"
+  fi
+
+  die "failed to download $label"
 }
 
 write_launcher() {
@@ -145,6 +292,11 @@ backup_existing_launcher() {
 version="${CODEX_VERSION:-0.130.0}"
 install_root="${CODEX_INSTALL_ROOT:-$HOME/.local/share/codex-cli}"
 bin_dir="${CODEX_BIN_DIR:-$HOME/.local/bin}"
+download_retries="${SAFE_CODEX_DOWNLOAD_RETRIES:-8}"
+download_retry_delay="${SAFE_CODEX_DOWNLOAD_RETRY_DELAY:-2}"
+download_connect_timeout="${SAFE_CODEX_DOWNLOAD_CONNECT_TIMEOUT:-15}"
+download_max_time="${SAFE_CODEX_DOWNLOAD_MAX_TIME:-900}"
+download_retry_max_time="${SAFE_CODEX_DOWNLOAD_RETRY_MAX_TIME:-300}"
 replace_existing=0
 allow_update=0
 run_check=1
@@ -201,6 +353,12 @@ if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
   die "version must be an explicit semver, not a tag: $version"
 fi
 
+validate_positive_int SAFE_CODEX_DOWNLOAD_RETRIES "$download_retries"
+validate_positive_int SAFE_CODEX_DOWNLOAD_RETRY_DELAY "$download_retry_delay"
+validate_positive_int SAFE_CODEX_DOWNLOAD_CONNECT_TIMEOUT "$download_connect_timeout"
+validate_positive_int SAFE_CODEX_DOWNLOAD_MAX_TIME "$download_max_time"
+validate_positive_int SAFE_CODEX_DOWNLOAD_RETRY_MAX_TIME "$download_retry_max_time"
+
 detect_platform
 
 native_package="@openai/codex"
@@ -225,7 +383,6 @@ if [[ "$dry_run" == 1 ]]; then
   exit 0
 fi
 
-need_command curl
 need_command openssl
 need_command python3
 need_command tar
@@ -247,7 +404,7 @@ mkdir -p "$extract_dir" "$staging_dir" "$install_root" "$bin_dir" "$quarantine_r
 chmod 700 "$install_root" "$bin_dir" "$quarantine_root"
 
 printf 'fetching %s metadata for %s\n' "$native_package" "$native_version"
-curl_fetch "$metadata_url" -o "$metadata_file"
+download_url "$metadata_url" "$metadata_file" "metadata"
 
 metadata_name="$(json_field "$metadata_file" name)"
 metadata_version="$(json_field "$metadata_file" version)"
@@ -268,7 +425,7 @@ case "$integrity" in
 esac
 
 printf 'downloading native payload tarball\n'
-curl_fetch "$tarball_url" -o "$archive_file"
+download_url "$tarball_url" "$archive_file" "native payload"
 
 expected="${integrity#sha512-}"
 actual="$(openssl dgst -sha512 -binary "$archive_file" | openssl base64 -A)"
