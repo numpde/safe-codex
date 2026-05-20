@@ -224,6 +224,7 @@
       <a href="#overview">Overview</a>
       <a href="#install">Build</a>
       <a href="#host-npm-guard">Host npm guard</a>
+      <a href="#native-codex-install">Native Codex install</a>
       <a href="#run">Run</a>
       <a href="#storage">Storage</a>
       <a href="#profiles">Profiles</a>
@@ -280,6 +281,7 @@
             <tr><td><code>proxy/squid-nonlocal.conf</code></td><td>Default egress policy: Internet allowed, local/private IP destinations blocked.</td></tr>
             <tr><td><code>proxy/squid-openai.conf</code></td><td>Stricter egress policy for OpenAI/ChatGPT domains.</td></tr>
             <tr><td><code>bin/safe-codex</code></td><td>Launcher for Podman or Docker.</td></tr>
+            <tr><td><code>bin/install-native-codex-cli</code></td><td>Optional host helper that installs the native Codex CLI payload without invoking <code>npm</code>, <code>npx</code>, <code>corepack</code>, <code>nvm</code>, or <code>node</code>.</td></tr>
             <tr><td><code>bin/install-node-package-tool-deny-stubs</code></td><td>Optional host helper that disables normal <code>npm</code>, <code>npx</code>, and <code>corepack</code> use while leaving <code>node</code> available.</td></tr>
             <tr><td><code>bin/check</code></td><td>Non-invasive syntax and Dockerfile checks.</td></tr>
             <tr><td><code>safe-codex.env.example</code></td><td>Optional local defaults.</td></tr>
@@ -330,6 +332,24 @@
         </div>
 
         <p>To undo the guard, remove the marked <code>safe-codex disable host npm/npx/corepack</code> block from the shell startup file, remove the managed commands from <code>~/.local/bin</code>, and restore files from <code>~/.quarantine</code> only if you intentionally want those tools back.</p>
+      </section>
+
+      <section id="native-codex-install">
+        <h2>Native Codex install</h2>
+        <p>To restore or install host Codex without restoring host package-manager entrypoints, use the native installer:</p>
+        <pre><code>./bin/install-native-codex-cli --dry-run --version 0.130.0
+./bin/install-native-codex-cli --version 0.130.0</code></pre>
+
+        <p>The installer downloads the platform-specific <code>@openai/codex</code> native tarball directly from the npm registry, requires an explicit version, verifies the registry-published <code>sha512</code> integrity value, extracts only the native vendor payload, and writes a <code>~/.local/bin/codex</code> launcher.</p>
+
+        <p>The default payload path is:</p>
+        <pre><code>~/.local/share/codex-cli/VERSION</code></pre>
+
+        <p>The script does not invoke <code>npm</code>, <code>npx</code>, <code>corepack</code>, <code>nvm</code>, or <code>node</code>. The generated launcher blocks <code>codex update</code> by default, so upgrades remain an explicit reinstall with a pinned version.</p>
+
+        <div class="callout">
+          <p>This still trusts the npm registry metadata, TLS, and the published native Codex tarball for the pinned version. It is meant to avoid package-manager execution on the host, not to prove the binary from source.</p>
+        </div>
       </section>
 
       <section id="run">
@@ -580,7 +600,7 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
         <p>Run local syntax checks without building images:</p>
         <pre><code>./bin/check</code></pre>
 
-        <p>This validates the launcher scripts, the optional host npm guard, and Dockerfile syntax. If <code>safe-codex-proxy:latest</code> already exists, it also runs Squid's parser against both proxy profiles. If <code>shellcheck</code> is installed, it is used too.</p>
+        <p>This validates the launcher scripts, the native Codex installer, the optional host npm guard, and Dockerfile syntax. If <code>safe-codex-proxy:latest</code> already exists, it also runs Squid's parser against both proxy profiles. If <code>shellcheck</code> is installed, it is used too.</p>
       </section>
     </main>
   </div>

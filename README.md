@@ -28,6 +28,13 @@ normal `npm`, `npx`, and `corepack` use:
 ./bin/install-node-package-tool-deny-stubs
 ```
 
+Install native Codex without npm/npx/corepack:
+
+```bash
+./bin/install-native-codex-cli --dry-run --version 0.130.0
+./bin/install-native-codex-cli --version 0.130.0
+```
+
 Run checks:
 
 ```bash

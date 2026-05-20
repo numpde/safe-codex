@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  install-native-codex-cli [options]
+
+Installs the native Codex CLI payload directly from the npm registry tarball,
+without invoking npm, npx, corepack, nvm, or node. The installer pins a version,
+verifies the registry-published sha512 integrity value, extracts only the native
+vendor payload, and writes ~/.local/bin/codex.
+
+Options:
+  --version VERSION       Codex native package version. Default: 0.130.0.
+  --install-root PATH     Versioned payload root. Default: ~/.local/share/codex-cli.
+  --bin-dir PATH          Directory for the codex launcher. Default: ~/.local/bin.
+  --replace               Replace an existing payload for the same version.
+  --allow-codex-update    Do not block `codex update` in the launcher.
+  --no-run-check          Do not execute the installed binary for --version check.
+  --dry-run               Print actions without downloading or writing files.
+  -h, --help              Show this help.
+
+Supported platforms:
+  Linux x86_64, Linux arm64, macOS x86_64, macOS arm64.
+EOF
+}
+
+die() {
+  printf 'install-native-codex-cli: %s\n' "$*" >&2
+  exit 1
+}
+
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+json_field() {
+  local file="$1"
+  local field="$2"
+
+  python3 - "$file" "$field" <<'PY'
+import json
+import sys
+
+path = sys.argv[2].split(".")
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    value = json.load(fh)
+for key in path:
+    value = value[key]
+print(value)
+PY
+}
+
+detect_platform() {
+  local os
+  local arch
+
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os:$arch" in
+    Linux:x86_64|Linux:amd64)
+      platform_suffix="linux-x64"
+      target_triple="x86_64-unknown-linux-musl"
+      ;;
+    Linux:aarch64|Linux:arm64)
+      platform_suffix="linux-arm64"
+      target_triple="aarch64-unknown-linux-musl"
+      ;;
+    Darwin:x86_64|Darwin:amd64)
+      platform_suffix="darwin-x64"
+      target_triple="x86_64-apple-darwin"
+      ;;
+    Darwin:arm64|Darwin:aarch64)
+      platform_suffix="darwin-arm64"
+      target_triple="aarch64-apple-darwin"
+      ;;
+    *)
+      die "unsupported platform: $os $arch"
+      ;;
+  esac
+}
+
+curl_fetch() {
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$@"
+}
+
+write_launcher() {
+  local launcher="$1"
+  local root_path="$2"
+  local allow_update="$3"
+  local quoted_root
+  local tmp
+
+  quoted_root="$(shell_quote "$root_path")"
+  tmp="$(mktemp "$launcher.tmp.XXXXXX")"
+  if [[ "$allow_update" == 1 ]]; then
+    cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+# safe-codex native Codex CLI launcher
+root=$quoted_root
+export PATH="\$root/path:\$PATH"
+exec "\$root/codex/codex" "\$@"
+EOF
+  else
+    cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+# safe-codex native Codex CLI launcher
+if [[ "\${1:-}" == "update" && "\${SAFE_CODEX_ALLOW_CODEX_UPDATE:-}" != 1 ]]; then
+  printf '%s\n' 'codex update is disabled by this launcher. Re-run install-native-codex-cli with a pinned version instead.' >&2
+  exit 127
+fi
+root=$quoted_root
+export PATH="\$root/path:\$PATH"
+exec "\$root/codex/codex" "\$@"
+EOF
+  fi
+  chmod 700 "$tmp"
+  mv "$tmp" "$launcher"
+}
+
+backup_existing_launcher() {
+  local launcher="$1"
+  local quarantine_root="$2"
+  local backup_dir
+
+  [[ -e "$launcher" || -L "$launcher" ]] || return 0
+
+  if [[ -f "$launcher" ]] && grep -q "safe-codex native Codex CLI launcher" "$launcher" 2>/dev/null; then
+    return 0
+  fi
+
+  backup_dir="$(mktemp -d "$quarantine_root/codex-launcher-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+  mv "$launcher" "$backup_dir/codex"
+  printf 'backed up existing launcher to %s/codex\n' "$backup_dir"
+}
+
+version="${CODEX_VERSION:-0.130.0}"
+install_root="${CODEX_INSTALL_ROOT:-$HOME/.local/share/codex-cli}"
+bin_dir="${CODEX_BIN_DIR:-$HOME/.local/bin}"
+replace_existing=0
+allow_update=0
+run_check=1
+dry_run=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      [[ $# -ge 2 ]] || die "--version requires a value"
+      version="$2"
+      shift 2
+      ;;
+    --install-root)
+      [[ $# -ge 2 ]] || die "--install-root requires a path"
+      install_root="$2"
+      shift 2
+      ;;
+    --bin-dir)
+      [[ $# -ge 2 ]] || die "--bin-dir requires a path"
+      bin_dir="$2"
+      shift 2
+      ;;
+    --replace)
+      replace_existing=1
+      shift
+      ;;
+    --allow-codex-update)
+      allow_update=1
+      shift
+      ;;
+    --no-run-check)
+      run_check=0
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+if [[ "$dry_run" != 1 && "${EUID:-$(id -u)}" == 0 && "${SAFE_CODEX_ALLOW_ROOT_INSTALL:-}" != 1 ]]; then
+  die "refusing to install per-user Codex as root; rerun as the target user or set SAFE_CODEX_ALLOW_ROOT_INSTALL=1"
+fi
+
+if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
+  die "version must be an explicit semver, not a tag: $version"
+fi
+
+detect_platform
+
+native_package="@openai/codex"
+encoded_package="@openai%2Fcodex"
+native_version="$version-$platform_suffix"
+target_dir="$install_root/$version"
+launcher="$bin_dir/codex"
+metadata_url="https://registry.npmjs.org/$encoded_package/$native_version"
+
+if [[ "$dry_run" != 1 && ( -e "$target_dir" || -L "$target_dir" ) && "$replace_existing" != 1 ]]; then
+  die "$target_dir already exists; rerun with --replace to replace it"
+fi
+
+if [[ "$dry_run" == 1 ]]; then
+  printf 'Would install native Codex CLI:\n'
+  printf '  version: %s\n' "$version"
+  printf '  package: %s@%s\n' "$native_package" "$native_version"
+  printf '  target:  %s\n' "$target_triple"
+  printf '  from:    %s\n' "$metadata_url"
+  printf '  into:    %s\n' "$target_dir"
+  printf '  launcher:%s\n' " $launcher"
+  exit 0
+fi
+
+need_command curl
+need_command openssl
+need_command python3
+need_command tar
+need_command mktemp
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-native-install.XXXXXX")"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+metadata_file="$tmp_dir/metadata.json"
+archive_file="$tmp_dir/codex-native.tgz"
+extract_dir="$tmp_dir/extract"
+staging_dir="$tmp_dir/staging"
+quarantine_root="$HOME/.quarantine"
+
+mkdir -p "$extract_dir" "$staging_dir" "$install_root" "$bin_dir" "$quarantine_root"
+chmod 700 "$install_root" "$bin_dir" "$quarantine_root"
+
+printf 'fetching %s metadata for %s\n' "$native_package" "$native_version"
+curl_fetch "$metadata_url" -o "$metadata_file"
+
+metadata_name="$(json_field "$metadata_file" name)"
+metadata_version="$(json_field "$metadata_file" version)"
+tarball_url="$(json_field "$metadata_file" dist.tarball)"
+integrity="$(json_field "$metadata_file" dist.integrity)"
+
+[[ "$metadata_name" == "$native_package" ]] || die "metadata name mismatch: $metadata_name"
+[[ "$metadata_version" == "$native_version" ]] || die "metadata version mismatch: $metadata_version"
+
+case "$tarball_url" in
+  https://registry.npmjs.org/*) ;;
+  *) die "refusing unexpected tarball URL: $tarball_url" ;;
+esac
+
+case "$integrity" in
+  sha512-*) ;;
+  *) die "expected sha512 integrity, got: $integrity" ;;
+esac
+
+printf 'downloading native payload tarball\n'
+curl_fetch "$tarball_url" -o "$archive_file"
+
+expected="${integrity#sha512-}"
+actual="$(openssl dgst -sha512 -binary "$archive_file" | openssl base64 -A)"
+if [[ "$actual" != "$expected" ]]; then
+  die "sha512 integrity verification failed"
+fi
+printf 'verified sha512 integrity\n'
+
+tar_member="package/vendor/$target_triple"
+if ! tar -tzf "$archive_file" "$tar_member/codex/codex" >/dev/null 2>&1; then
+  die "tarball does not contain expected native binary path: $tar_member/codex/codex"
+fi
+
+while IFS= read -r member; do
+  case "$member" in
+    "$tar_member"|"$tar_member/"|"$tar_member"/*) ;;
+    *) die "tarball listed unexpected member outside selected payload: $member" ;;
+  esac
+
+  case "$member" in
+    /*|../*|*/../*|*/..)
+      die "tarball listed unsafe path: $member"
+      ;;
+  esac
+done < <(tar -tzf "$archive_file" "$tar_member")
+
+tar -xzf "$archive_file" -C "$extract_dir" "$tar_member"
+mv "$extract_dir/$tar_member" "$staging_dir/$version"
+
+if [[ ! -x "$staging_dir/$version/codex/codex" ]]; then
+  die "extracted native binary is missing or not executable"
+fi
+
+symlink_path="$(find "$staging_dir/$version" -type l -print -quit)"
+if [[ -n "$symlink_path" ]]; then
+  die "refusing extracted payload containing symlink: $symlink_path"
+fi
+
+chmod -R u+rwX,go-rwx "$staging_dir/$version"
+
+if [[ "$run_check" == 1 ]]; then
+  observed="$("$staging_dir/$version/codex/codex" --version 2>&1)"
+  printf '%s\n' "$observed"
+  case "$observed" in
+    *"$version"*) ;;
+    *) die "installed binary version check did not include expected version $version" ;;
+  esac
+fi
+
+if [[ -e "$target_dir" || -L "$target_dir" ]]; then
+  if [[ "$replace_existing" != 1 ]]; then
+    die "$target_dir already exists; rerun with --replace to replace it"
+  fi
+  backup_dir="$(mktemp -d "$install_root/replaced-$version-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+  rmdir "$backup_dir"
+  mv "$target_dir" "$backup_dir"
+  printf 'backed up existing payload to %s\n' "$backup_dir"
+fi
+
+mv "$staging_dir/$version" "$target_dir"
+backup_existing_launcher "$launcher" "$quarantine_root"
+write_launcher "$launcher" "$target_dir" "$allow_update"
+
+printf '\nInstalled native Codex CLI %s.\n' "$version"
+printf 'Payload:  %s\n' "$target_dir"
+printf 'Launcher: %s\n' "$launcher"
+printf '\nOpen a new shell, or run:\n'
+printf '  export PATH='
+shell_quote "$bin_dir"
+printf ':"$PATH"\n'
+printf '  hash -r\n'
+printf '\nVerify:\n'
+printf '  codex --version\n'

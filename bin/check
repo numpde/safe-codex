@@ -8,6 +8,7 @@ bash -n \
   bin/safe-codex \
   bin/safe-codex-docker \
   bin/safe-codex-podman \
+  bin/install-native-codex-cli \
   bin/install-node-package-tool-deny-stubs
 
 if command -v shellcheck >/dev/null 2>&1; then
@@ -15,6 +16,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     bin/safe-codex \
     bin/safe-codex-docker \
     bin/safe-codex-podman \
+    bin/install-native-codex-cli \
     bin/install-node-package-tool-deny-stubs \
     bin/check
 fi
