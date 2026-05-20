@@ -20,6 +20,14 @@ Common commands:
 ./bin/safe-codex-podman profiles
 ```
 
+Optional host guard, for keeping host `node` and Codex available while blocking
+normal `npm`, `npx`, and `corepack` use:
+
+```bash
+./bin/install-node-package-tool-deny-stubs --dry-run
+./bin/install-node-package-tool-deny-stubs
+```
+
 Run checks:
 
 ```bash

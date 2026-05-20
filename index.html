@@ -223,10 +223,11 @@
       <strong>safe-codex</strong>
       <a href="#overview">Overview</a>
       <a href="#install">Build</a>
+      <a href="#host-npm-guard">Host npm guard</a>
       <a href="#run">Run</a>
       <a href="#storage">Storage</a>
       <a href="#profiles">Profiles</a>
-      <a href="#multiple-sessions">Multiple Sessions</a>
+      <a href="#multiple-sessions">Multiple sessions</a>
       <a href="#mounts">Mounts</a>
       <a href="#network">Network</a>
       <a href="#auth">Authentication</a>
@@ -241,7 +242,7 @@
       </header>
 
       <section>
-        <h2>What It Does</h2>
+        <h2>What it does</h2>
         <div class="grid">
           <div class="tile">
             <strong>Small host surface</strong>
@@ -265,7 +266,7 @@
       </section>
 
       <section>
-        <h2>Repository Files</h2>
+        <h2>Repository files</h2>
         <table>
           <thead>
             <tr>
@@ -279,6 +280,7 @@
             <tr><td><code>proxy/squid-nonlocal.conf</code></td><td>Default egress policy: Internet allowed, local/private IP destinations blocked.</td></tr>
             <tr><td><code>proxy/squid-openai.conf</code></td><td>Stricter egress policy for OpenAI/ChatGPT domains.</td></tr>
             <tr><td><code>bin/safe-codex</code></td><td>Launcher for Podman or Docker.</td></tr>
+            <tr><td><code>bin/install-node-package-tool-deny-stubs</code></td><td>Optional host helper that disables normal <code>npm</code>, <code>npx</code>, and <code>corepack</code> use while leaving <code>node</code> available.</td></tr>
             <tr><td><code>bin/check</code></td><td>Non-invasive syntax and Dockerfile checks.</td></tr>
             <tr><td><code>safe-codex.env.example</code></td><td>Optional local defaults.</td></tr>
           </tbody>
@@ -299,6 +301,35 @@
         <pre><code>./bin/safe-codex-docker build</code></pre>
 
         <p>The build uses npm once inside the build container with <code>--ignore-scripts</code>, then removes npm, npx, and corepack from the runtime image.</p>
+      </section>
+
+      <section id="host-npm-guard">
+        <h2>Host npm guard</h2>
+        <p>The container image removes package-manager entrypoints from the Codex runtime. If the host should also keep <code>node</code> and node-based tools available while avoiding accidental <code>npm</code>, <code>npx</code>, or <code>corepack</code> use, install the optional per-user deny stubs:</p>
+        <pre><code>./bin/install-node-package-tool-deny-stubs --dry-run
+./bin/install-node-package-tool-deny-stubs</code></pre>
+
+        <p>This writes managed stubs and helper commands under <code>~/.local/bin</code>:</p>
+        <pre><code>~/.local/bin/npm
+~/.local/bin/npx
+~/.local/bin/corepack
+~/.local/bin/strip-node-package-tools
+~/.local/bin/check-node-package-tools-disabled</code></pre>
+
+        <p>The helper also updates <code>~/.bashrc</code> by default so <code>~/.local/bin</code> stays first in <code>PATH</code>. If <code>nvm</code> has already been loaded by that startup file, the installed wrapper strips <code>npm</code>, <code>npx</code>, and <code>corepack</code> again after common <code>nvm</code> commands that can reintroduce them.</p>
+
+        <p>Existing <code>~/.local/bin</code> entries with those names are moved under <code>~/.quarantine</code> before replacement. Existing <code>nvm</code> package-manager files are also moved there by <code>strip-node-package-tools</code>. The script does not run <code>npm</code>, <code>npx</code>, <code>corepack</code>, or package install scripts.</p>
+
+        <p>Verify the host state at any time:</p>
+        <pre><code>check-node-package-tools-disabled</code></pre>
+
+        <p>Use <code>--no-rc</code> if you do not want the script to edit a shell startup file. Use <code>--rc-file PATH</code> to point it at a different Bash startup file.</p>
+
+        <div class="callout">
+          <p>This is a per-user guard against normal and accidental use, not a hard system policy. A process with your user privileges can still bypass it by invoking a hidden absolute path, changing <code>PATH</code>, installing another Node distribution, or restoring files from quarantine. Run untrusted package work inside containers.</p>
+        </div>
+
+        <p>To undo the guard, remove the marked <code>safe-codex disable host npm/npx/corepack</code> block from the shell startup file, remove the managed commands from <code>~/.local/bin</code>, and restore files from <code>~/.quarantine</code> only if you intentionally want those tools back.</p>
       </section>
 
       <section id="run">
@@ -335,7 +366,7 @@
       </section>
 
       <section id="storage">
-        <h2>Storage Model</h2>
+        <h2>Storage model</h2>
         <p>The container home is split deliberately.</p>
         <table>
           <thead>
@@ -382,7 +413,7 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
       </section>
 
       <section id="multiple-sessions">
-        <h2>Multiple Sessions</h2>
+        <h2>Multiple sessions</h2>
         <p>A profile controls Codex's persistent state. A workspace controls which host files are mounted at <code>/workspace</code>. Changing the profile while keeping the same workspace gives you a separate Codex state volume looking at the same host files.</p>
 
         <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
@@ -436,7 +467,7 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
       </section>
 
       <section id="mounts">
-        <h2>Read-Only and Extra Mounts</h2>
+        <h2>Read-only and extra mounts</h2>
         <p>Inspect a repo read-only:</p>
         <pre><code>/path/to/safe-codex/bin/safe-codex-podman run \
   --workspace /path/to/suspicious \
@@ -471,7 +502,7 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
       </section>
 
       <section id="network">
-        <h2>Network Modes</h2>
+        <h2>Network modes</h2>
         <table>
           <thead>
             <tr>
@@ -549,7 +580,7 @@ podman unshare ls -la ~/.local/share/containers/storage/volumes/safe-codex-state
         <p>Run local syntax checks without building images:</p>
         <pre><code>./bin/check</code></pre>
 
-        <p>If <code>safe-codex-proxy:latest</code> already exists, this also runs Squid's parser against both proxy profiles. If <code>shellcheck</code> is installed, it is used too.</p>
+        <p>This validates the launcher scripts, the optional host npm guard, and Dockerfile syntax. If <code>safe-codex-proxy:latest</code> already exists, it also runs Squid's parser against both proxy profiles. If <code>shellcheck</code> is installed, it is used too.</p>
       </section>
     </main>
   </div>
