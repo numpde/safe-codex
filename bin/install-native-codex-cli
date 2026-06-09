@@ -240,11 +240,14 @@ download_url() {
 write_launcher() {
   local launcher="$1"
   local root_path="$2"
-  local allow_update="$3"
+  local binary_path="$3"
+  local allow_update="$4"
   local quoted_root
+  local quoted_binary
   local tmp
 
   quoted_root="$(shell_quote "$root_path")"
+  quoted_binary="$(shell_quote "$binary_path")"
   tmp="$(mktemp "$launcher.tmp.XXXXXX")"
   if [[ "$allow_update" == 1 ]]; then
     cat >"$tmp" <<EOF
@@ -252,8 +255,9 @@ write_launcher() {
 set -euo pipefail
 # safe-codex native Codex CLI launcher
 root=$quoted_root
+binary=$quoted_binary
 export PATH="\$root/path:\$PATH"
-exec "\$root/codex/codex" "\$@"
+exec "\$root/\$binary" "\$@"
 EOF
   else
     cat >"$tmp" <<EOF
@@ -265,8 +269,9 @@ if [[ "\${1:-}" == "update" && "\${SAFE_CODEX_ALLOW_CODEX_UPDATE:-}" != 1 ]]; th
   exit 127
 fi
 root=$quoted_root
+binary=$quoted_binary
 export PATH="\$root/path:\$PATH"
-exec "\$root/codex/codex" "\$@"
+exec "\$root/\$binary" "\$@"
 EOF
   fi
   chmod 700 "$tmp"
@@ -435,8 +440,15 @@ fi
 printf 'verified sha512 integrity\n'
 
 tar_member="package/vendor/$target_triple"
-if ! tar -tzf "$archive_file" "$tar_member/codex/codex" >/dev/null 2>&1; then
-  die "tarball does not contain expected native binary path: $tar_member/codex/codex"
+binary_relative=""
+for candidate in codex/codex bin/codex; do
+  if tar -tzf "$archive_file" "$tar_member/$candidate" >/dev/null 2>&1; then
+    binary_relative="$candidate"
+    break
+  fi
+done
+if [[ -z "$binary_relative" ]]; then
+  die "tarball does not contain an expected native binary path under $tar_member"
 fi
 
 while IFS= read -r member; do
@@ -455,7 +467,7 @@ done < <(tar -tzf "$archive_file" "$tar_member")
 tar -xzf "$archive_file" -C "$extract_dir" "$tar_member"
 mv "$extract_dir/$tar_member" "$staging_dir/$version"
 
-if [[ ! -x "$staging_dir/$version/codex/codex" ]]; then
+if [[ ! -x "$staging_dir/$version/$binary_relative" ]]; then
   die "extracted native binary is missing or not executable"
 fi
 
@@ -467,7 +479,7 @@ fi
 chmod -R u+rwX,go-rwx "$staging_dir/$version"
 
 if [[ "$run_check" == 1 ]]; then
-  observed="$("$staging_dir/$version/codex/codex" --version 2>&1)"
+  observed="$("$staging_dir/$version/$binary_relative" --version 2>&1)"
   printf '%s\n' "$observed"
   case "$observed" in
     *"$version"*) ;;
@@ -487,7 +499,7 @@ fi
 
 mv "$staging_dir/$version" "$target_dir"
 backup_existing_launcher "$launcher" "$quarantine_root"
-write_launcher "$launcher" "$target_dir" "$allow_update"
+write_launcher "$launcher" "$target_dir" "$binary_relative" "$allow_update"
 
 printf '\nInstalled native Codex CLI %s.\n' "$version"
 printf 'Payload:  %s\n' "$target_dir"
