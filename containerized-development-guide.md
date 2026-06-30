@@ -193,6 +193,10 @@ Classify the code a lane runs before choosing its posture.
   previews. Default to a previously built image, no source mounts, no secrets
   unless required, explicit network membership, and no host ports except through
   the intended ingress path.
+- **Stateful service:** databases, queues, object stores, model servers, and
+  other services with durable volumes or restart policies. Default to explicit
+  project names, named volumes, healthchecks, backup/restore notes, migration
+  lanes, and conservative teardown.
 - **Release/publish:** artifact signing, registry push, and deployment. Default
   to a separate lane, release-only secrets, explicit allowlists, and immutable
   references.
@@ -653,6 +657,7 @@ Use separate lanes when the trust boundary changes.
 | Dependency apply | None | Staged output plus narrow repo outputs | Narrow repo outputs | `node_modules`, `dependencies`, lock/checksum files |
 | Local service | Internal network or localhost port | Usually none or read-only | Named volume or tmpfs | Databases, local chains, preview servers |
 | Public ingress service | External ingress network | Usually none | Named volume or none | Reverse-proxy target, public preview |
+| Stateful service | Internal, local, or ingress | Usually none | Named volumes | Databases, queues, model servers, app runtime state |
 | Browser/runtime proof | Usually none | Read-only fixtures/source | Tmpfs only | Playwright, browser form semantics, rendering checks |
 | Stdio/tool runtime | Outbound API only or proxied | Usually none or seed file | Tmpfs or named state | MCP servers, CLIs exposed to agents |
 | Interactive agent/dev shell | Policy-dependent | Chosen workspace mount | Chosen workspace mount and named state | Human or agent sessions |
@@ -776,6 +781,39 @@ Proof:
 - Rendered config shows no source mounts, no engine socket, no direct ports,
   and only expected networks/aliases.
 - The service image and digest or local image ID are visible in status output.
+
+### Stateful service
+
+Purpose: run a durable service such as a database, queue, model server, or app
+runtime with persistent local state.
+
+Posture:
+
+- Use explicit project names so dev, staging, prod, and parallel checkouts do
+  not share volumes or orphan cleanup.
+- Prefer named volumes over host directory binds for service-owned data.
+- Treat `down --volumes` as destructive. Put it behind an explicit reset target
+  whose name says it deletes state.
+- Document backup, restore, export, or seed commands before encouraging
+  destructive resets.
+- Keep migrations in their own lane with explicit env files and project names.
+- Use healthchecks and readiness dependencies for services that need ordered
+  startup.
+- Set restart policy, stop grace period, and log limits deliberately for
+  long-running services.
+- Avoid `container_name` in reusable development Compose files because it
+  prevents parallel projects. Reserve it for intentional singletons and document
+  the collision tradeoff.
+
+Proof:
+
+- Status output lists project name, volumes, published ports, restart policy,
+  and reset command.
+- Rendered checks cover volume names, healthchecks, restart policy, log policy,
+  and absence of unexpected host binds.
+- Docs or status output identify backup/restore expectations for durable
+  volumes.
+- Migration/check lanes prove they target the intended project and env file.
 
 ### Browser/runtime proof
 
@@ -1247,6 +1285,15 @@ ingress network for one boundary, attach only the proxy and intended services,
 and keep public-facing service containers free of source mounts, host homes,
 engine sockets, and routine development secrets.
 
+Reverse proxies that discover containers through the Docker or Podman API are
+container-management lanes. A read-only Docker socket still exposes broad
+metadata and often enough authority to affect host security indirectly through
+the engine API surface, labels, and discovered services. Prefer static config
+or a narrow socket-proxy when practical. If direct socket discovery is accepted,
+keep it out of routine dev/check lanes, constrain it to the ingress host,
+document the socket as high-privilege, and check which networks, labels, and
+services the proxy is allowed to observe.
+
 When a public service uses a mutable local image tag, make the lifecycle
 explicit:
 
@@ -1661,6 +1708,9 @@ deliberately not being removed or changed.
 Use explicit project, profile, and volume names. Accidental reuse of a default
 Compose project name can mix unrelated services, orphan cleanup, networks, and
 volumes. Names should identify the lane and, for persistent state, the profile.
+Avoid `container_name` in reusable development lanes unless the singleton
+behavior is the point; it prevents parallel checkouts and can make cleanup hit
+the wrong service.
 
 Validate user-provided ports, profile names, device selectors, mount
 destinations, and env-file keys before passing them to the container engine.
@@ -1802,6 +1852,8 @@ These patterns should fail review unless documented as exceptions:
   equivalent manual run.
 - A launcher silently falls back to a weaker engine, user namespace, network,
   mount, image, or secret posture.
+- A reusable development Compose file hardcodes `container_name` without a
+  singleton exception.
 - A dependency install command can update locks or metadata by default.
 - A package-manager install stage relies on lifecycle scripts without a written
   reason.
@@ -1816,6 +1868,8 @@ These patterns should fail review unless documented as exceptions:
 - A long-running service has unbounded logs or logs credential-bearing payloads.
 - A cleanup command removes containers, volumes, networks, compose projects, or
   tagged images without saying so in its name and status output.
+- A reset command deletes named volumes or database state without an explicit
+  destructive name and confirmation/status output.
 
 ## Checks to add
 
@@ -1825,6 +1879,8 @@ Use repository checks to freeze the container contract. Good checks include:
 - No service uses `privileged: true`, host network, host PID/IPC,
   container-engine sockets, broad devices, added capabilities, or broad group
   additions without a named exception.
+- Reusable development services do not set `container_name` unless the lane is
+  documented as a singleton.
 - Remote engine access, if present, uses SSH or mutually authenticated TLS and
   treats client credentials as high-privilege secrets.
 - No service disables seccomp, AppArmor, or SELinux confinement without a named
@@ -1840,6 +1896,9 @@ Use repository checks to freeze the container contract. Good checks include:
 - Published ports are bound to `127.0.0.1` unless explicitly public.
 - Public ingress services have no source mounts, no host-home mounts, no engine
   sockets, no debug commands, and only the intended ingress network.
+- Reverse-proxy services that mount engine sockets are isolated as explicit
+  container-management lanes and checked for intended networks, labels, and
+  observed services.
 - Browser/runtime proof lanes keep executable tmpfs, larger PID budgets, and
   browser profiles local to that lane.
 - Stdio/protocol tool manifests publish no ports, mount no host home/config by
@@ -1892,6 +1951,8 @@ Use repository checks to freeze the container contract. Good checks include:
   by design.
 - Healthchecks and readiness dependencies are checked for scenario lanes where
   startup ordering matters.
+- Stateful-service checks cover named volumes, restart policy, stop grace
+  period, log limits, migration target, and destructive reset naming.
 
 Use rendered-configuration checks when string checks are too weak. For Compose,
 prefer checking `docker compose config --format json` for service sets, merged
@@ -2018,6 +2079,9 @@ Use this checklist when adding or reviewing a container lane.
       a documented exception.
 - [ ] Does not mount container-engine sockets, including Docker and Podman
       sockets, unless the lane is explicitly a container-management lane.
+- [ ] Reverse proxies with engine-socket discovery are documented as
+      high-privilege container-management lanes or replaced with static config
+      or a narrow socket proxy.
 - [ ] Remote engine credentials are treated as high-privilege secrets.
 - [ ] Adds devices only behind an explicit mode and documentation.
 - [ ] Does not mount `/dev` wholesale.
@@ -2039,6 +2103,10 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] Persistent state uses a named volume when it should survive sessions.
 - [ ] Persistent volumes are managed through the engine, not by assuming a
       stable host storage path.
+- [ ] Destructive reset targets name and print that they delete volumes or
+      durable service data.
+- [ ] Durable service volumes have documented backup, restore, export, or seed
+      expectations.
 - [ ] SELinux bind-mount labels are explicit on SELinux hosts.
 - [ ] Interactive sessions have profile, status, attach, stop, and reset/remove
       operations.
@@ -2055,6 +2123,7 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] Publish-all behavior such as `-P` is not used.
 - [ ] Public ingress services use dedicated networks where practical and avoid
       source mounts, host homes, engine sockets, and development secrets.
+- [ ] Reverse-proxy networks and labels expose only the intended services.
 - [ ] Profile-gated services have rendered checks for no-profile, individual
       profile, and teardown profile combinations.
 - [ ] Protocol proxies enforce method/tool allowlists when read-only behavior
@@ -2169,6 +2238,12 @@ Use this checklist when adding or reviewing a container lane.
       relevant.
 - [ ] Mutating commands print the project/profile/image/network/output scope
       they are about to affect.
+- [ ] Long-running services declare restart policy, stop grace period, and log
+      retention deliberately.
+- [ ] Migration lanes are separate from ordinary service startup and target the
+      intended project/env file.
+- [ ] Reusable development Compose services avoid `container_name`; singleton
+      services document the collision tradeoff.
 - [ ] Cleanup commands state what they remove and what they deliberately leave
       alone.
 - [ ] Maintenance/update commands are separate from routine check/test lanes.
