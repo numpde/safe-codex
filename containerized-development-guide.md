@@ -14,6 +14,16 @@ The controlling question is:
 What authority does this lane need, and how do we prove it received no more?
 ```
 
+A strong setup usually has these visible pieces:
+
+- One supported operator entrypoint, such as `make` or a small launcher.
+- A lane map that says what each command reads, writes, reaches, starts, and
+  persists.
+- Container definitions that encode the boundary instead of relying on README
+  habits.
+- Checks that inspect the artifact users actually run: rendered Compose,
+  generated commands, installed dependency state, or live proxy behavior.
+
 Key terms:
 
 - **Lane:** one supported workflow such as checks, tests, dependency install,
@@ -132,11 +142,16 @@ Optimize in this order:
    Keep normal dependency commands locked. Make update mode explicit, staged,
    verified, and review-shaped.
 
-6. Protect reproducibility.
+6. Protect operator intent.
+   Make build, run, update, publish, cleanup, and teardown separate commands
+   when they have different risk. Print what will be touched before mutating
+   local state.
+
+7. Protect reproducibility.
    Pin images and tools, control build context, avoid short-name image
    resolution, and make generated artifacts drift-checked.
 
-7. Prove the boundary.
+8. Prove the boundary.
    A posture that is not checked will drift. Prefer rendered or live checks
    whenever text inspection would miss the real behavior.
 
@@ -157,12 +172,27 @@ Classify the code a lane runs before choosing its posture.
 - **Dependency materialization:** package managers, archive downloads, and
   lifecycle-capable installers. Default to allowlisted egress, minimal
   manifests, no repo-root writes, and staged output.
+- **Generated artifact refresh:** code generation, ABI export, contract
+  snapshots, docs output, site builds, and other committed or published
+  artifacts. Default to read-only inputs, narrow writable outputs, root guards,
+  and drift checks.
+- **Browser or runtime proof:** real browser/runtime checks that need behavior
+  unavailable in lightweight tests. Default to no network, read-only fixtures,
+  pinned runtime image, and local exceptions for executable tmpfs or larger
+  process budgets.
+- **Stdio or protocol tool:** client-local tools exposed to a host or agent.
+  Default to no inbound ports, no host-home mounts, strict config validation,
+  narrow outbound API access, and generated hardened launch argv.
 - **Interactive execution:** agent shells, human dev shells, REPLs, and
   exploratory commands. Default to a rootless engine, named state, and
   read-only workspace.
 - **Local service:** databases, emulators, preview servers, and local chains.
   Default to profile-gated startup, no repo mount, and loopback or internal
   ports only.
+- **Public or ingress service:** local reverse-proxy targets and public
+  previews. Default to a previously built image, no source mounts, no secrets
+  unless required, explicit network membership, and no host ports except through
+  the intended ingress path.
 - **Release/publish:** artifact signing, registry push, and deployment. Default
   to a separate lane, release-only secrets, explicit allowlists, and immutable
   references.
@@ -193,15 +223,27 @@ Match the proof to the claim. Stronger claims need stronger evidence.
    interpolation. Use this for profiles, ports, mounts, users, networks,
    secrets, and engine-specific flags.
 
-4. **Live allow/deny proof:** checks run a real service or proxy and show one
+4. **Wiring proof:** checks inspect the supported entrypoint, such as the
+   Makefile or launcher, and prove it passes the intended project name,
+   profiles, env files, update flags, and teardown flags to the runtime. Use
+   this when the Compose file is correct but the wrapper can call it wrongly.
+
+5. **Live allow/deny proof:** checks run a real service or proxy and show one
    expected success and one expected failure. Use this for egress filters,
    protocol allowlists, listener scope, and local/private address blocking.
+   Whenever possible, the live check should reuse the real service definition
+   with a small checker overlay instead of duplicating a test-only policy.
 
-5. **Clean-tree proof:** checks run from a clean checkout or copied build
+6. **Clean-tree proof:** checks run from a clean checkout or copied build
    context. Use this for package/release behavior that must not depend on
    ignored files, local caches, host tools, or uncommitted state.
 
-6. **Operational proof:** `doctor`, `status`, `profiles`, `volumes`, and
+7. **Fixture proof:** policy classifiers include known-good and known-bad
+   examples. Use this for source-policy tests, package-shape tests, Dockerfile
+   pin checks, and URL/registry allowlists so reviewers know the test can fail
+   for the right reason.
+
+8. **Operational proof:** `doctor`, `status`, `profiles`, `volumes`, and
    teardown commands show what is currently running, persisted, exposed, and
    removable. Use this for interactive sessions and long-running services.
 
@@ -238,6 +280,9 @@ Use this quick map before reading the details:
 - **Network:** default to no network or explicit proxied egress. This helps
   prevent exfiltration, local/LAN/metadata access, and accidental public
   listeners. It does not prove a networked process cannot leak readable data.
+- **Configuration:** parse env files, origins, ports, profiles, and selectors
+  strictly. This helps prevent local shell state or broad env files from
+  silently changing authority. It does not prove configured authority is safe.
 - **Dependency/update:** use locked defaults, explicit update mode, and a
   stage/apply split. This helps prevent silent lock drift and networked repo
   writes. It does not prove the locked dependency is benign.
@@ -323,6 +368,20 @@ container outbound internet.
 **Design consequence:** default to no network, route dependency/API lanes
 through explicit proxies, block local/private/link-local destinations, and add
 live allow/deny checks for important egress policy.
+
+### Configuration and launch input
+
+**What it helps with:** strict env-file parsing, required interpolation,
+validated origins, explicit profiles, and canonical aliases prevent accidental
+authority changes through ambient shell state, implicit `.env` loading, typoed
+ports, conflicting variables, or broad user-provided values.
+
+**Residual risk:** a valid configuration can still intentionally grant broad
+authority. A checked-in non-secret env file can still point a lane at the wrong
+service, expose a port, or enable mutations if the policy allows it.
+
+**Design consequence:** treat configuration as code. Keep it explicit, strict,
+checked, and visible in status output.
 
 ### Dependency and update
 
@@ -453,31 +512,42 @@ authority intentional, small, and covered by proof.
    Operators should be able to run `make help` or `tool doctor` and see the
    supported lanes.
 
-2. Give every lane a declared posture.
+2. Keep a lane map near the entrypoint.
+   A short table or help output should state each lane's purpose, network,
+   writes, persistent state, and cleanup command. The map is part of the
+   security interface, not decorative documentation.
+
+3. Give every lane a declared posture.
    Document whether it has network, what it mounts, what it can write, whether
    it publishes ports, whether it needs secrets, and whether it is expected to
    be long-running.
 
-3. Keep default lanes offline and write-free.
+4. Keep default lanes offline and write-free.
    Formatting, source checks, unit tests, static policy checks, and ordinary
    builds must start with no network and no write access to the source tree.
    Add exceptions lane by lane.
 
-4. Split network from repository writes.
+5. Split network from repository writes.
    A dependency tool that talks to the internet should not also receive
    repo-root read/write access. Stage into a container volume, verify, then
    apply offline to a narrow output path.
 
-5. Make updates explicit.
+6. Make updates explicit.
    Default dependency commands must install the locked state only. Lockfile,
    checksum, generated manifest, and remapping updates should require an
    explicit flag such as `ALLOW_UPDATE=1`.
 
-6. Prefer proof over convention.
+7. Split build from run when exposure changes.
+   A public or long-running service should normally start from an already built
+   image. Do not let a public startup command also fetch dependencies, build
+   source, update generated files, or pull a different image unless that is the
+   command's explicit purpose.
+
+8. Prefer proof over convention.
    Add checks that render Compose files, inspect generated commands, verify
    hardening flags, and exercise expected allow/deny behavior where practical.
 
-7. Fail closed on missing safety prerequisites.
+9. Fail closed on missing safety prerequisites.
    If rootless mode, user namespace mapping, proxy policy, read-only mounts,
    digest-pinned images, secret validation, or output-path validation is part of
    the lane's promised posture, absence of that prerequisite should stop the
@@ -497,6 +567,7 @@ containers/
   checks/Dockerfile
 tests/checks/
   test_container_posture.*
+docs/ or README.md lane map
 ```
 
 The first lane should be `checks`: offline, read-only, non-root, no
@@ -515,6 +586,14 @@ make ci
 Projects that do not use `make` should still provide the same concepts through
 one documented launcher: help, checks, test, CI-equivalent, doctor/status where
 long-lived state exists.
+
+The first documentation does not need to be long. It should answer:
+
+- Which command is the default safe loop?
+- Which commands can write the checkout?
+- Which commands use network?
+- Which commands start long-running services?
+- Which commands require cleanup or persistent state review?
 
 ## Design sequence
 
@@ -569,13 +648,225 @@ Use separate lanes when the trust boundary changes.
 | Live checks | External network, explicit | Read-only inputs | None | Prove proxy allow/deny behavior or upstream reachability |
 | Tests | Usually none | Copied build context or read-only mount | Tmpfs only | Unit, integration, invariant, parity tests |
 | Package/build | Usually none after image build | Copied build context | Narrow artifact output | Wheels, sdists, release-shaped artifacts |
+| Generated artifact refresh | Usually none | Read-only source and exact external inputs | Narrow committed outputs | ABI export, contract snapshots, docs/site generation |
 | Dependency stage | Allowlisted egress only | Minimal input files | Container volume | Package manager install, archive download |
 | Dependency apply | None | Staged output plus narrow repo outputs | Narrow repo outputs | `node_modules`, `dependencies`, lock/checksum files |
 | Local service | Internal network or localhost port | Usually none or read-only | Named volume or tmpfs | Databases, local chains, preview servers |
+| Public ingress service | External ingress network | Usually none | Named volume or none | Reverse-proxy target, public preview |
+| Browser/runtime proof | Usually none | Read-only fixtures/source | Tmpfs only | Playwright, browser form semantics, rendering checks |
+| Stdio/tool runtime | Outbound API only or proxied | Usually none or seed file | Tmpfs or named state | MCP servers, CLIs exposed to agents |
 | Interactive agent/dev shell | Policy-dependent | Chosen workspace mount | Chosen workspace mount and named state | Human or agent sessions |
 
 Do not merge lanes just because they use the same image. Merge only when the
 filesystem, network, secret, port, and lifecycle posture are the same.
+
+## Reference lane patterns
+
+Use these patterns as starting points. Adjust them only when the lane's purpose
+requires it, and add a check for the adjustment.
+
+### Offline source checks
+
+Purpose: inspect repository text, generated-file freshness, Docker/Compose
+posture, package metadata, and policy rules.
+
+Posture:
+
+- Build or use a small checks image.
+- Run with `network_mode: "none"`.
+- Mount the checkout read-only.
+- Use fixed non-root `65532:65532`.
+- Set read-only root filesystem, dropped capabilities, no new privileges, PID
+  and memory limits, and tmpfs `/tmp`.
+- Set `PYTHONDONTWRITEBYTECODE=1` for Python checks.
+- Do not mount Docker or Podman sockets.
+
+Proof:
+
+- The checks assert their own service posture.
+- Rendered Compose checks use `docker compose config` without runtime socket
+  access when only merge/interpolation behavior is needed.
+- Policy classifiers include known-good and known-bad fixtures.
+
+### Generated artifact refresh
+
+Purpose: update committed artifacts derived from checked-in source or an
+explicit sibling checkout.
+
+Posture:
+
+- No network unless the generator is explicitly a live fetcher.
+- Read-only source inputs.
+- Read-only sibling checkout when a second repository is the source of truth.
+- Narrow read/write binds for only the generated files or directories.
+- Long-form binds with `create_host_path: false`.
+- Caller UID/GID only for the output-writing service.
+- Host-side guards for root identity, symlinks, wrong types, and resolved paths.
+- Fixed generator command; no arbitrary command tail.
+
+Proof:
+
+- A no-write drift check fails when generated artifacts are stale.
+- The wrapper wiring is checked so the generator gets the intended inputs and
+  output paths.
+
+### Dependency stage/apply/verify
+
+Purpose: materialize package-manager or archive dependencies without giving
+networked tools repo-root write access.
+
+Posture:
+
+- A networked stage receives only manifests, locks, patches, verifier code, and
+  a Docker volume.
+- Egress goes through a proxy or firewall that allowlists destinations and
+  blocks local, private, link-local, multicast, and metadata addresses.
+- Verifier and patcher responsibilities use the smallest practical tool image.
+- Locked apply has no network and fails if metadata would change.
+- Update apply has no network and runs only when an explicit update flag is
+  set.
+- Installed dependency verification runs with no network before build/test
+  consumes the tree.
+
+Proof:
+
+- Source policy checks reject unexpected registries, URLs, archive shapes,
+  package managers, nested locks, and import paths.
+- Integrity checks compare upstream archive or package bytes, local patches,
+  generated checksums, and installed tree contents.
+- A live check proves one allowed dependency host works and one denied host
+  fails using the real proxy service plus a checker overlay.
+
+### Local service
+
+Purpose: run a database, local chain, emulator, docs server, or preview server.
+
+Posture:
+
+- Separate internal-only, host-local, and public variants.
+- Use profiles so bare Compose commands do not start host-published services.
+- Publish host-local ports only on `127.0.0.1`.
+- Keep services free of source mounts and secrets unless the purpose requires
+  them.
+- Use named volumes or tmpfs for service state.
+- Provide status and down commands with the same project/profile set as startup.
+
+Proof:
+
+- Render no-profile, each-profile, and all-profiles service sets.
+- Check rendered ports, networks, mounts, user, resources, and secrets.
+- Check teardown wiring includes every profile that startup can create.
+
+### Public ingress service
+
+Purpose: expose a local image through a reverse proxy or public preview path.
+
+Posture:
+
+- Build the image in a separate target.
+- Start from the built image with no implicit build or pull.
+- Use no source mounts and no host-home mounts.
+- Attach only the intended ingress network.
+- Do not publish direct host ports unless direct exposure is the purpose.
+- Keep debug commands, development env, and routine credentials out of the
+  service.
+
+Proof:
+
+- Rendered config shows no source mounts, no engine socket, no direct ports,
+  and only expected networks/aliases.
+- The service image and digest or local image ID are visible in status output.
+
+### Browser/runtime proof
+
+Purpose: prove behavior that source tests or DOM emulators cannot prove, such
+as real browser form semantics, rendering, fetch behavior, or extension/plugin
+runtime behavior.
+
+Posture:
+
+- Use a pinned browser/runtime image by digest.
+- Run with no network unless the test explicitly needs a local service.
+- Mount only the test fixtures and source needed for the browser proof.
+- Keep the root filesystem read-only and use tmpfs for browser runtime files.
+- Give the browser only the larger PID, memory, and executable tmpfs exceptions
+  it actually needs.
+- Keep browser proof lanes separate from ordinary source checks so the
+  exception does not become the default.
+
+Proof:
+
+- Checks assert the exception is local to the browser lane.
+- Rendered config shows no host ports, no broad source mount, and no persistent
+  browser profile unless persistence is the purpose.
+
+### Stdio or protocol tool runtime
+
+Purpose: run a client-local tool exposed to an agent or host over stdio,
+JSON-RPC, MCP, or another local protocol.
+
+Posture:
+
+- Publish no inbound ports.
+- Do not mount the host home, agent config, Docker config, SSH material, or
+  package-manager credentials.
+- Mount optional seed/config files read-only and at exact paths.
+- Prefer startup env or seed files for secrets over tool calls that pass secret
+  values through transcripts or debug views.
+- Validate runtime configuration before starting the protocol loop.
+- Restrict outbound network to the configured API origin when practical; if
+  only bridge networking is available, document that egress is not hard-limited.
+- Expose a narrow tool surface by profile, deployment mode, or allowlist.
+
+Proof:
+
+- A `check-config` or `doctor` command prints non-secret resolved posture:
+  upstream origin, mode, mutation posture, allowed tool count, timeout, owner
+  or seed source, and log level.
+- Generated install/run manifests include the hardened argv, and a drift check
+  proves they match the source-of-truth generator.
+- Tests reject unknown env aliases, conflicting aliases, whitespace-normalized
+  secrets, unsupported tools, and profile/tool mismatches.
+
+### Interactive agent or shell
+
+Purpose: give a human or agent a reusable containerized workspace.
+
+Posture:
+
+- Prefer rootless Podman.
+- Keep tool home/state in a profile-scoped named volume.
+- Default workspace mount is read-only.
+- Workspace read/write, bridge network, risky mounts, and devices require
+  explicit flags.
+- Route default network through a local/private-destination-blocking proxy or
+  use no network.
+- Provide doctor, status, profiles, attach, stop, and remove/reset commands.
+
+Proof:
+
+- Doctor output shows engine, rootless status, user namespace, profile, mounts,
+  network, GPU/device mode, and volumes.
+- Generated Docker and Podman commands are checked separately when both are
+  supported.
+
+### Host maintenance
+
+Purpose: prune caches, rotate state, install timers, or bound logs.
+
+Posture:
+
+- Keep cleanup direct and narrow.
+- Do not hide cleanup behind broad project targets.
+- Print exactly what will be removed and what is out of scope.
+- Use a timer plus one-shot service for unattended periodic cleanup.
+- Do not remove containers, volumes, networks, tagged images, or release
+  artifacts from routine hygiene unless the command name says so.
+
+Proof:
+
+- Timer/service files or generated install scripts have no-write drift checks.
+- Status output confirms timers, services, and cleanup scope.
 
 ## Source boundary choices
 
@@ -587,6 +878,7 @@ Choose the source boundary intentionally:
 | Copied build context | Tests that should resemble release/package behavior | Lanes that must inspect uncommitted ignored files |
 | Temporary manifest tree | Networked package-manager install stages | General source checks or broad tool execution |
 | Narrow writable bind | Owned generated output such as `dist/` or docs build output | Dependency tools with network access |
+| Read-only sibling checkout | Contract/API snapshot refreshes from another local repository | Networked tools or broad transitive source discovery |
 | Named volume | Persistent tool state, staged dependency output | Source of truth that reviewers must diff |
 | Tmpfs | Caches, temporary output, build intermediates | Durable state or committed artifacts |
 
@@ -671,6 +963,38 @@ if `LOCAL_UID=0` is supplied.
 
 Use a fixed unprivileged user such as `65532:65532` for read-only inspection
 lanes. Use the caller UID/GID only when a lane must write host-owned artifacts.
+Treat caller UID/GID as an ergonomic write mechanism, not as a default security
+mechanism.
+
+When caller UID/GID is accepted:
+
+- Validate that supplied IDs are canonical decimal integers.
+- Reject UID or GID `0` by default.
+- Apply the guard before any container that can write host files.
+- Re-run writable target checks immediately before the container starts.
+- Make any root override explicit, named, and absent from routine checks.
+
+For images that need a named non-root account, a fixed UID such as `65532` is a
+reasonable convention, but treat it as a convention, not a law:
+
+- Prefer numeric `USER 65532` or runtime `user: "65532:65532"` for enforcement.
+  Some orchestrators can verify numeric non-root users more reliably than
+  username strings.
+- Adding static `/etc/passwd` and `/etc/group` entries during image build is
+  acceptable when application libraries expect username or home-directory
+  lookup. Do it in the image build, not by making `/etc/passwd` writable at
+  runtime.
+- Directly writing entries such as `nonroot:x:65532:65532:...` is reasonable in
+  minimal images or when distro account tools warn because `65532` sits outside
+  their normal allocation range.
+- Check for duplicate users/groups if the base image may already define
+  `nonroot` or UID/GID `65532`.
+- Keep the account shell non-login and the home on a tmpfs or other explicit
+  writable path when the root filesystem is read-only.
+- For OpenShift or Kubernetes environments that assign arbitrary UIDs, fixed
+  UID ownership is not enough. Writable paths may need group ownership and
+  permissions compatible with the platform's security model, and the deployed
+  security context should be verified separately.
 
 Be explicit about the engine policy:
 
@@ -724,6 +1048,10 @@ Rules for container-management lanes:
 
 - Do not mount the container-engine socket into an untrusted container.
 - Prefer host-side launcher commands for runtime management.
+- Rendering Compose config is not the same as managing containers. A check
+  container may include the Compose CLI and run `docker compose config` without
+  a Docker socket when it only needs offline interpolation and merge behavior.
+  Keep that distinction visible in docs and tests.
 - If a container must receive an engine socket, make that lane explicit,
   documented, and isolated from secrets, broad source mounts, and writable repo
   mounts.
@@ -766,6 +1094,26 @@ For any writable output path, check before mounting:
 - The resolved path remains inside the physical repository root.
 - The container can write only the files or directories that lane owns.
 
+Prefer long-form bind mounts for writable outputs:
+
+```yaml
+volumes:
+  - type: bind
+    source: ./owned-output
+    target: /work/out
+    bind:
+      create_host_path: false
+```
+
+Use the host entrypoint to create intentional placeholder files or directories
+before Compose runs, then validate them. Do not let the container runtime create
+surprising host paths because a source path was misspelled.
+
+For generated artifacts derived from a sibling checkout, mount the sibling
+checkout read-only and mount only the exact output files or directories
+read/write. The generator should not receive broad write access to either
+repository.
+
 For interactive agents, keep the agent home/state in a named volume rather than
 mounting the host agent config directory. Mount the workspace read-only by
 default for inspection sessions, then opt into read/write for editing sessions.
@@ -786,6 +1134,54 @@ On SELinux-enabled hosts, bind mounts need explicit labeling. Prefer private
 labels for project-specific mounts and shared labels only when multiple
 containers intentionally need the same content. Treat label broadening like any
 other mount exception.
+
+## Configuration and environment
+
+Treat configuration as a boundary. Env files and launch variables decide
+origins, ports, secrets, network posture, profiles, mutation posture, and output
+paths.
+
+Good patterns:
+
+- Keep checked-in env files non-secret and explicit.
+- Pass env files deliberately with `--env-file`; do not rely on implicit
+  project `.env` loading for security-sensitive behavior.
+- Parse env files strictly in launchers and tests: exact `KEY=value` syntax,
+  no duplicate keys, no unsupported keys, and no silent whitespace cleanup for
+  security-sensitive values.
+- List each service's runtime environment explicitly in Compose rather than
+  passing the whole env file through to the container.
+- Require required values with `${NAME:?missing_NAME}` interpolation.
+- Validate ports, URLs, origins, profile names, device selectors, and output
+  paths before invoking the container runtime.
+- Accept compatibility aliases only at startup, canonicalize them to one
+  internal name, and fail if aliases conflict.
+- Print non-secret resolved configuration in `doctor`, `status`, or
+  `check-config`.
+
+Avoid:
+
+- Mounting or copying broad `.env` files into containers.
+- Allowing arbitrary env keys to affect a launcher.
+- Letting local shell state choose network, publish, update, or secret posture
+  without appearing in status output.
+- Storing secrets in checked-in env files, Dockerfile `ENV`, image labels, or
+  generated install snippets.
+
+For URLs and origins:
+
+- Prefer origins over arbitrary URLs when only a scheme, host, and port are
+  needed.
+- Reject credentials, paths, queries, and fragments unless the lane explicitly
+  needs them.
+- Reject private/local/link-local/metadata destinations for internet-facing
+  proxy lanes.
+- If local/private origins are a legitimate development use case, say so and
+  add browser drive-by protections such as same-origin checks, Fetch Metadata
+  checks, cookie/origin/referer stripping, redirect stripping, size limits, and
+  timeouts.
+- Do not confuse browser-facing proxy hardening with authentication. A local
+  dev proxy is still a local service authority.
 
 ## Devices and GPUs
 
@@ -843,6 +1239,22 @@ For host-local services, distinguish listener scope from container egress. A
 service can bind `127.0.0.1` on the host and still have outbound internet from
 its bridge network. If that tradeoff is accepted, keep the service free of
 secrets and broad mounts.
+
+For public or reverse-proxy services, distinguish "no host port" from "no
+network." A service on an external ingress network may be reachable by the
+proxy and may be able to reach peers on that network. Prefer a dedicated
+ingress network for one boundary, attach only the proxy and intended services,
+and keep public-facing service containers free of source mounts, host homes,
+engine sockets, and routine development secrets.
+
+When a public service uses a mutable local image tag, make the lifecycle
+explicit:
+
+- `build` creates or refreshes the local image.
+- `local-up` may build and force-recreate for fast iteration.
+- `public-up` should normally depend on the explicit build target, then start
+  with no implicit build or pull.
+- Teardown should target the exact project/profile/network that startup used.
 
 With rootless Podman, networking may be implemented differently from rootful
 Docker. That changes ergonomics and sometimes reachability, but not the
@@ -952,6 +1364,8 @@ Pin what matters:
 
 - Base images by fully qualified registry name and digest.
 - Tool versions in Dockerfiles.
+- OS packages installed in Dockerfiles, or an explicit documented policy that
+  those packages intentionally track the pinned base image's repository.
 - Package lockfiles or hash-locked requirements.
 - Release scanner images and other security tooling by fully qualified registry
   name and digest.
@@ -970,10 +1384,23 @@ Choose pull behavior deliberately:
 
 - Build/update lanes may pull when they are explicitly refreshing images.
 - Routine offline checks should not implicitly pull images from the network.
+- Public or service-start lanes should not silently rebuild or pull. Build or
+  image-refresh should be a separate visible action.
 - A `doctor` or status command should show the resolved image reference and
   whether the image is present locally.
 - Release lanes should verify that pushed or consumed digests match the
   expected immutable reference.
+
+For Dockerfile package managers:
+
+- Prefer exact package pins when the distro and repository make that stable.
+- If exact pins are too brittle, document the distro-tracked policy near the
+  Dockerfile and make image refresh a deliberate maintenance action.
+- Add a repository check that rejects unpinned `apt-get install`, `apk add`,
+  `pip install`, `npm install`, or similar package installs unless the file or
+  lane has a named exception.
+- Do not mix package-manager install and runtime service startup in the same
+  operator command.
 
 When a publisher provides image signatures, attestations, provenance, or SBOMs,
 verify them in an explicit image-update or release lane. Prefer modern
@@ -994,6 +1421,20 @@ Use `.dockerignore` aggressively:
 - Exclude common secret paths and filenames: `.env`, `.netrc`, `.npmrc`,
   `.pypirc`, `.ssh`, cloud config, Docker config, key/cert/token files.
 - Keep lockfiles and source-of-truth build manifests inside the build context.
+
+For small images, prefer an allowlist-shaped context:
+
+```text
+**
+!containers/checks/Dockerfile
+!tests/checks/**
+!package.json
+!src/**
+```
+
+This pattern makes accidental inclusion of local caches and secrets less
+likely. It costs a little maintenance when adding legitimate inputs, which is
+usually a useful review point.
 
 Choose build-time network deliberately:
 
@@ -1123,6 +1564,14 @@ host-published service. Split service variants by access boundary:
 - Public preview: explicit target, explicit host, no debug posture, bounded
   resources, and a teardown command.
 
+For profile-gated services, check the rendered service set:
+
+- No active profile renders no accidental services.
+- Each profile starts only the intended services.
+- The all-profiles teardown path includes every service that startup can create.
+- Ports, networks, mounts, user, resources, and secrets are verified on the
+  rendered profile combination, not only in source text.
+
 If a service needs a normal bridge network to publish a localhost port, state
 that tradeoff and keep the service free of secrets and repo mounts.
 
@@ -1130,6 +1579,18 @@ Do not use publish-all behavior such as `docker run -P` or equivalent generated
 commands. `EXPOSE` documents intended container ports, but publish-all turns
 that metadata into host listeners. Enumerate every host port explicitly and
 check the rendered listener address.
+
+Use healthchecks and readiness conditions for multi-service lanes:
+
+- A dependent service should wait for the dependency's health condition when
+  the protocol needs a ready server rather than only a started process.
+- Healthchecks should use local loopback inside the service container where
+  possible.
+- Keep healthcheck commands small and non-secret.
+- Avoid healthchecks that require external internet unless the service itself
+  is an external-network live check.
+- Rendered checks should verify healthchecks and `depends_on` conditions for
+  scenario lanes where startup order matters.
 
 ## Interactive sessions
 
@@ -1204,6 +1665,16 @@ volumes. Names should identify the lane and, for persistent state, the profile.
 Validate user-provided ports, profile names, device selectors, mount
 destinations, and env-file keys before passing them to the container engine.
 
+Keep service commands in the Compose file or launcher-owned argv when they are
+part of the boundary. Appending arbitrary user-provided command tails to a
+hardened service can bypass the intended entrypoint, output validation, or
+cleanup path. If a lane is intentionally a shell or command runner, name it as
+such and give it an interactive-lane posture.
+
+Status output should be specific. For a mutating command, print the project
+name, profiles, image, network mode, published ports, writable outputs,
+persistent volumes, and cleanup command where relevant.
+
 ## Source of truth
 
 Keep the container contract in as few places as possible.
@@ -1212,6 +1683,8 @@ Good patterns:
 
 - One launcher or Makefile owns the supported operator commands.
 - One Compose file or generated manifest owns each service boundary.
+- Overlays add test checkers, local ports, or public ingress membership without
+  duplicating the service's security policy.
 - One generator owns generated run manifests, Dockerfiles, or install snippets.
 - One no-write check proves generated output is current.
 - One update command refreshes generated output deliberately.
@@ -1224,6 +1697,8 @@ Bad patterns:
 - Docker and Podman commands diverge accidentally instead of through documented
   engine-specific flags.
 - A check validates a simplified fixture while users run a different command.
+- A live proxy or ingress test uses a different allowlist, network, or service
+  definition from the real lane.
 - Updating dependencies, generated manifests, or launch commands happens as a
   side effect of a normal check/test command.
 
@@ -1358,13 +1833,26 @@ Use repository checks to freeze the container contract. Good checks include:
   resource-bounded, and networkless.
 - Writable lanes mount only their owned artifact paths.
 - Bind mounts set `create_host_path: false` where implicit creation is risky.
+- Makefile or launcher wiring passes the intended `COMPOSE_PROJECT_NAME`,
+  profiles, env files, update flags, and down/cleanup profile set.
+- Env-file checks reject duplicate keys, unsupported keys, malformed lines,
+  conflicting aliases, and secret-looking values in checked-in files.
 - Published ports are bound to `127.0.0.1` unless explicitly public.
+- Public ingress services have no source mounts, no host-home mounts, no engine
+  sockets, no debug commands, and only the intended ingress network.
+- Browser/runtime proof lanes keep executable tmpfs, larger PID budgets, and
+  browser profiles local to that lane.
+- Stdio/protocol tool manifests publish no ports, mount no host home/config by
+  default, and include the hardened generated argv.
 - External images and base images are fully qualified and digest-pinned.
 - Checked-in workflows do not use unqualified image short names.
 - Pull behavior is explicit for generated commands and CI lanes.
 - Image signature, attestation, provenance, or SBOM verification is explicit
   when the project claims to rely on it.
 - Build contexts exclude local secrets and generated artifacts.
+- `.dockerignore` is allowlist-shaped for small build contexts where practical.
+- Dockerfile package installs follow the project's pin policy, either exact
+  versions or a named distro-tracked exception.
 - Dockerfile `ENV`, labels, and image metadata do not contain secrets.
 - Build-time network mode is explicit where image builds are part of the
   workflow.
@@ -1382,6 +1870,11 @@ Use repository checks to freeze the container contract. Good checks include:
   no-write drift checks.
 - Container-backed checks themselves do not depend on host package managers.
 - Root guards, port validators, env parsers, and mount validators have tests.
+- URL/origin validators reject credentials, unexpected paths, unsupported
+  schemes, and local/private destinations where the lane promises public egress
+  only.
+- Writable output guards reject root identities, symlinks, wrong file types,
+  missing required parents, and paths outside the physical repository.
 - Engine checks verify the promised engine posture, such as rootless Podman
   when a lane documents rootless Podman as its safer path.
 - Podman user namespace mode is explicit for generated commands, especially
@@ -1397,6 +1890,8 @@ Use repository checks to freeze the container contract. Good checks include:
   known-good example and rejects known-bad examples.
 - Long-running services have bounded logs and no credential-bearing log output
   by design.
+- Healthchecks and readiness dependencies are checked for scenario lanes where
+  startup ordering matters.
 
 Use rendered-configuration checks when string checks are too weak. For Compose,
 prefer checking `docker compose config --format json` for service sets, merged
@@ -1458,12 +1953,14 @@ Image(s):
 Source boundary:
 Writable outputs:
 Network:
+Configuration/env:
 Secrets:
 Devices:
 Ports:
 Persistent state:
 Runtime posture:
 Update mode:
+Health/readiness:
 Checks/proofs:
 Residual risks:
 Maintenance:
@@ -1486,6 +1983,8 @@ Use this checklist when adding or reviewing a container lane.
       package, service, or interactive.
 - [ ] It is separate from other lanes when its trust boundary differs.
 - [ ] The docs say what it reads, writes, reaches, and starts.
+- [ ] The entrypoint help or nearby lane map says whether it uses network,
+      writes host files, starts services, or persists state.
 - [ ] The docs state the lane's residual risk: what malicious code could still
       do with the authority intentionally granted.
 
@@ -1493,6 +1992,13 @@ Use this checklist when adding or reviewing a container lane.
 
 - [ ] Runs as non-root.
 - [ ] Refuses root host execution where host writes are possible.
+- [ ] Caller UID/GID is used only for deliberate host writes, not for read-only
+      lanes that could use a fixed non-root identity.
+- [ ] User-supplied UID/GID values are canonical decimal IDs and reject zero by
+      default.
+- [ ] Fixed image users use numeric non-root UIDs, and any `/etc/passwd` or
+      `/etc/group` entries are image-build-time metadata, not runtime writes.
+- [ ] Fixed UID/GID choices are checked for base-image collisions.
 - [ ] Uses rootless Podman for lower-trust interactive lanes where available,
       or documents why a different engine is used.
 - [ ] Podman lanes choose `--userns=auto` or `--userns=keep-id` deliberately.
@@ -1523,6 +2029,10 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] Build/package validation uses copied build context where practical.
 - [ ] Writable bind mounts are limited to lane-owned outputs.
 - [ ] Writable host paths are checked for symlinks and expected type.
+- [ ] Writable host paths are checked to resolve inside the physical repository
+      or another explicitly declared output root.
+- [ ] Bind mounts use long syntax with `create_host_path: false` when implicit
+      host-path creation would hide mistakes.
 - [ ] Mount destinations are fixed and narrow.
 - [ ] Host home, SSH, cloud config, Docker config, package-manager config, and
       agent config are not mounted by default.
@@ -1543,6 +2053,10 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] Inbound ports are absent unless the lane is explicitly a service.
 - [ ] Published local ports bind to `127.0.0.1`.
 - [ ] Publish-all behavior such as `-P` is not used.
+- [ ] Public ingress services use dedicated networks where practical and avoid
+      source mounts, host homes, engine sockets, and development secrets.
+- [ ] Profile-gated services have rendered checks for no-profile, individual
+      profile, and teardown profile combinations.
 - [ ] Protocol proxies enforce method/tool allowlists when read-only behavior
       matters.
 - [ ] A live allow/deny check exists for important egress policy.
@@ -1583,10 +2097,14 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] Provenance policy checks expected builder, source revision, materials,
       build parameters, platform, and produced digest when provenance is used.
 - [ ] Tool versions are explicit.
+- [ ] Dockerfile package-manager installs follow the project's pin policy or
+      have a named distro-tracked exception.
 - [ ] Package requirements are locked or hash-checked where the ecosystem
       supports it.
 - [ ] `.dockerignore` excludes secrets, local state, caches, and generated
       artifacts.
+- [ ] Small build contexts use an allowlist-shaped `.dockerignore` where
+      practical.
 - [ ] Required lockfiles and source manifests are included in the build context.
 - [ ] Build images remove package managers from runtime images when they are not
       needed at runtime.
@@ -1608,6 +2126,19 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] Logs and generated manifests do not include secret values.
 - [ ] Agent or protocol tool arguments are treated as visible to the local host.
 
+### Configuration
+
+- [ ] Checked-in env files are non-secret and have exact, documented keys.
+- [ ] Launchers parse env files strictly or Compose lists service env vars
+      explicitly rather than passing broad env files through.
+- [ ] Required values fail closed with clear diagnostics.
+- [ ] Compatibility env aliases canonicalize to one name and conflicting aliases
+      fail.
+- [ ] URLs and origins reject unsupported schemes, credentials, and unexpected
+      path/query/fragment components.
+- [ ] Local/private destination behavior is explicit: blocked for public egress
+      lanes, or documented and browser-hardened for local dev proxies.
+
 ### Logs
 
 - [ ] Long-running services have bounded log growth.
@@ -1619,8 +2150,14 @@ Use this checklist when adding or reviewing a container lane.
 
 - [ ] Offline repository checks cover the posture contract.
 - [ ] Runtime checks render and inspect merged configuration where needed.
+- [ ] Entrypoint wiring checks cover project names, profiles, env files, update
+      flags, and cleanup/down paths.
+- [ ] Scenario/service checks verify healthchecks and readiness dependencies
+      where startup order matters.
 - [ ] Live checks prove at least one expected success and one expected failure
       for critical network policy.
+- [ ] Live checks reuse the real service/proxy policy with a checker overlay
+      instead of duplicating a separate test policy.
 - [ ] Generated outputs have no-write drift checks and explicit regenerate
       commands.
 - [ ] The narrowest relevant container-backed check is documented for reviewers.
@@ -1630,6 +2167,8 @@ Use this checklist when adding or reviewing a container lane.
 - [ ] `doctor` or equivalent status output shows selected engine, rootless
       status, network mode, mount mode, profiles, and persistent volumes where
       relevant.
+- [ ] Mutating commands print the project/profile/image/network/output scope
+      they are about to affect.
 - [ ] Cleanup commands state what they remove and what they deliberately leave
       alone.
 - [ ] Maintenance/update commands are separate from routine check/test lanes.
