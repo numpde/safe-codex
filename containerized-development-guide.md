@@ -1725,6 +1725,73 @@ Status output should be specific. For a mutating command, print the project
 name, profiles, image, network mode, published ports, writable outputs,
 persistent volumes, and cleanup command where relevant.
 
+## Launchers and generated commands
+
+A wrapper script or generated install command is part of the container boundary.
+It can accidentally defeat a careful Compose file by changing arguments,
+silently reusing stale containers, or interpreting user input through the host
+shell.
+
+Build container-engine invocations as argument vectors, not interpolated
+strings. In shell, that usually means arrays plus `"${args[@]}"`; in Python,
+`subprocess.run([...], shell=False)`; in generated manifests, a structured argv
+field. Avoid `eval`, `sh -c` command assembly, and unreviewed shell word
+splitting for anything that contains user input, paths, environment values,
+image names, labels, or mount specs.
+
+If a command prefix is configurable, keep the contract narrow. A variable such
+as `DOCKER_COMPOSE=docker compose` is useful, but paths, wrappers, and flags
+with spaces become hard to reason about unless the launcher owns parsing and
+tests it. Prefer one supported prefix shape, or parse it with a real shell
+lexer in checks and reject unsupported forms.
+
+Validate names before they reach the engine:
+
+- Profiles, project names, volume names, network names, and generated container
+  names should use a conservative character set.
+- Names should include the lane/profile when persistent state is involved.
+- Empty, path-like, shell-like, wildcard, newline, and control-character names
+  should fail before command construction.
+
+Validate host paths before mounting them:
+
+- Resolve host paths with the physical filesystem, not by trusting text.
+- Use `realpath -e` or equivalent for paths that must already exist.
+- Check expected type: file, directory, socket, device, or absent output.
+- Reject symlinks for writable outputs unless the lane explicitly exists to
+  operate on symlinks.
+- Check that writable outputs resolve inside an allowed output root.
+- Reject host homes, sockets, SSH material, cloud config, Docker/Podman config,
+  and agent config by default.
+
+Be strict about mount syntax. Docker/Podman `--mount` uses comma-separated
+fields, so a host path containing a comma, newline, or control character can be
+ambiguous even when correctly quoted at the shell level. Either use a
+representation that can encode the value unambiguously, or reject such paths
+with a clear diagnostic. Compose long-form bind mounts avoid some argv-encoding
+issues, but still need path, type, and `create_host_path` checks.
+
+Keep command tails out of fixed-posture services. A service that exists to run a
+specific build, verifier, proxy, or protocol process should not accept an
+arbitrary appended command. If the lane is intentionally a shell or command
+runner, name it that way and give it the stricter interactive posture.
+
+Label managed engine objects. Containers, networks, and volumes created by a
+launcher should carry labels for project, lane role, profile, image reference or
+image ID, config hash, and tool version where useful. Use those labels for
+status and cleanup instead of parsing human `docker ps` output or matching broad
+name prefixes.
+
+Detect stale state deliberately. If a persistent proxy, service, or session was
+created with a different image, config hash, network mode, profile, or security
+posture, the launcher should report that fact and recreate only the managed
+object it owns. Silent reuse is worse than a clear restart.
+
+Launcher tests should include adversarial inputs: names with separators, paths
+outside the repo, symlinked writable paths, missing parents, commas/newlines in
+mount sources, root UID/GID, stale labels, missing rootless support, and
+unsupported command-prefix forms.
+
 ## Source of truth
 
 Keep the container contract in as few places as possible.
@@ -1850,8 +1917,15 @@ These patterns should fail review unless documented as exceptions:
 - A generated command uses publish-all port behavior such as `-P`.
 - A generated launch command lacks the hardening posture expected for the
   equivalent manual run.
+- A launcher builds container-engine commands with `eval`, `sh -c`, or
+  untrusted shell splitting around user-controlled values.
+- A generated mount spec accepts commas, newlines, control characters, or
+  unvalidated host paths without an encoding strategy.
 - A launcher silently falls back to a weaker engine, user namespace, network,
   mount, image, or secret posture.
+- A launcher parses human `docker ps` or `podman ps` output for ownership,
+  cleanup, or security decisions when labels or structured output are
+  available.
 - A reusable development Compose file hardcodes `container_name` without a
   singleton exception.
 - A dependency install command can update locks or metadata by default.
@@ -1891,6 +1965,19 @@ Use repository checks to freeze the container contract. Good checks include:
 - Bind mounts set `create_host_path: false` where implicit creation is risky.
 - Makefile or launcher wiring passes the intended `COMPOSE_PROJECT_NAME`,
   profiles, env files, update flags, and down/cleanup profile set.
+- Launchers assemble Docker/Podman commands as argv arrays or generated
+  structured manifests, not `eval` strings or shell-split text.
+- Configurable engine command prefixes are constrained or parsed by tested
+  logic; unsupported prefix forms fail clearly.
+- Profile, project, volume, network, and generated container names reject
+  separators, path-like values, shell metacharacters, newlines, and control
+  characters.
+- Generated mount specs reject ambiguous path values such as commas, newlines,
+  and control characters when the engine syntax cannot encode them safely.
+- Managed containers, networks, and volumes carry labels for role/profile and
+  enough config or image metadata to detect stale reuse.
+- Status and cleanup commands select managed objects by labels or structured
+  engine output, not broad name matching or human-formatted output.
 - Env-file checks reject duplicate keys, unsupported keys, malformed lines,
   conflicting aliases, and secret-looking values in checked-in files.
 - Published ports are bound to `127.0.0.1` unless explicitly public.
@@ -2048,6 +2135,32 @@ Use this checklist when adding or reviewing a container lane.
       writes host files, starts services, or persists state.
 - [ ] The docs state the lane's residual risk: what malicious code could still
       do with the authority intentionally granted.
+
+### Entrypoints and launchers
+
+- [ ] Docker/Podman commands are assembled as argv arrays, structured
+      manifests, or Compose files rather than interpolated strings.
+- [ ] No launcher uses `eval`, `sh -c`, or untrusted shell splitting for values
+      derived from users, env files, paths, profile names, or generated config.
+- [ ] Configurable command prefixes, if allowed, have a documented supported
+      shape and tests for accepted and rejected forms.
+- [ ] User-provided profile, project, volume, network, container, and image
+      selector values are validated before command construction.
+- [ ] Generated object names are deterministic, conservative, and include the
+      lane/profile where persistent state is involved.
+- [ ] Host paths are resolved before use and checked for existence, type,
+      symlink behavior, and allowed output root as appropriate.
+- [ ] Generated mount specs reject or safely encode values that the engine
+      syntax represents ambiguously, including commas and newlines for
+      comma-separated `--mount` syntax.
+- [ ] Fixed-posture services do not accept arbitrary command tails; shell or
+      command-runner lanes are named and hardened as interactive lanes.
+- [ ] Managed containers, networks, and volumes carry ownership and posture
+      labels.
+- [ ] Status, stale-state detection, and cleanup use labels or structured engine
+      output rather than human-formatted command output.
+- [ ] Stale managed objects are detected by image/config/profile/posture
+      metadata and recreated or reported deliberately.
 
 ### Runtime posture
 
@@ -2285,7 +2398,10 @@ A containerized lane is not done when the command works once. It is done when:
 
 - Its purpose, inputs, outputs, network, secrets, devices, ports, and state are
   documented.
-- Its runtime posture is encoded in the launcher or Compose file.
+- Its runtime posture is encoded in the launcher, generated manifest, or Compose
+  file.
+- Its launcher validates user input, builds engine commands without unsafe shell
+  interpretation, and detects stale managed state deliberately.
 - Its writable host paths are narrow and prevalidated.
 - Its network and secret exposure are no broader than the purpose requires.
 - Its generated outputs, if any, have a no-write drift check or an explicit
