@@ -42,7 +42,26 @@ Install native Codex without `npm`, `npx`, `corepack`, `nvm`, or `node`:
 ./bin/install-native-codex-cli --version 0.130.0
 ```
 
+To bind its downloads to a particular network interface (for example, Wi-Fi
+instead of a USB modem), set `SAFE_CODEX_DOWNLOAD_INTERFACE`:
+
+```bash
+SAFE_CODEX_DOWNLOAD_INTERFACE=wlp10s0 ./bin/install-native-codex-cli --version 0.130.0
+```
+
 ## Checks
+
+The same launcher also runs the fully containerized local Pi harness:
+
+```bash
+./bin/safe-codex --engine docker pi --backend exl3 --workspace ~/repos/project
+./bin/safe-codex --engine docker pi --backend exl3 \
+  --workspace ~/repos/project --workspace-ro
+```
+
+Pi keeps its inference-only relay and stricter network policy. By default it
+uses a disposable copy of committed `HEAD`; `--workspace-ro` exposes the real
+repository and Git history without write access. See [pi/README.md](pi/README.md).
 
 ```bash
 ./bin/check

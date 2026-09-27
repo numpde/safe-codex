@@ -53,6 +53,7 @@ usage() {
   cat <<'EOF'
 Usage:
   safe-codex [--engine podman|docker] build [--codex-version VERSION]
+  safe-codex [--engine docker] pi [build [--prepare|--offline] | PI_OPTIONS...]
   safe-codex [--engine podman|docker] run [options] [-- CODEX_ARGS...]
   safe-codex [--engine podman|docker] shell [options]
   safe-codex [--engine podman|docker] attach [--profile NAME]
@@ -82,6 +83,14 @@ Run options:
   --allow-bridge-network  Permit --network bridge, which bypasses the proxy.
   --allow-risky-mounts    Allow /run, /var/run, /dev, /proc, /sys, ~/.ssh,
                           ~/.codex, or mount trees containing sockets.
+
+Pi options:
+  --workspace PATH        Repository copied into an isolated writable workspace.
+  --workspace-ro          Directly mount the repository read-only, including .git.
+  --profile NAME          Saved Pi session profile.
+  --backend vllm|exl3     Local inference backend. Default: vllm.
+  --timeout SECONDS       Session limit. Default: 14400.
+  -- PI_ARGS...           Pass remaining arguments to Pi.
 
 Notes:
   - Default network is proxy: Codex gets Internet via a Squid proxy that blocks
@@ -333,7 +342,7 @@ validate_mount_source() {
 
 validate_workspace_source() {
   local src
-  src="$(validate_mount_source "$1")"
+  src="$(validate_mount_source "$1")" || return
   [[ -d "$src" ]] || die "workspace must be a directory: $src"
   printf '%s\n' "$src"
 }
@@ -376,7 +385,7 @@ parse_mount_spec() {
     dst="$default_dst/$(basename "$src")"
   fi
   [[ "$dst" == /* ]] || die "mount destination must be absolute: $dst"
-  src="$(validate_mount_source "$src")"
+  src="$(validate_mount_source "$src")" || return
   validate_mount_arg_path "mount source" "$src"
   validate_mount_arg_path "mount destination" "$dst"
   validate_extra_mount_destination "$dst"
@@ -1117,6 +1126,20 @@ doctor() {
 }
 
 case "$SUBCOMMAND" in
+  _validate-workspace)
+    [[ $# -eq 1 ]] || die "_validate-workspace requires exactly one path"
+    WORKSPACE="$(validate_workspace_source "$1")"
+    validate_mount_arg_path "workspace path" "$WORKSPACE"
+    printf '%s\n' "$WORKSPACE"
+    ;;
+  pi)
+    [[ "$ENGINE" == docker ]] || die "Pi currently requires Docker"
+    if [[ "${1:-}" == build ]]; then
+      shift
+      exec bash "$ROOT_DIR/pi/build.sh" "$@"
+    fi
+    exec python3 "$ROOT_DIR/pi/launch.py" "$@"
+    ;;
   build)
     build_images "$@"
     ;;

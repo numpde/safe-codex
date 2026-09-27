@@ -1,0 +1,4 @@
+Implement parse_duration in duration.py according to README.md. Read the files
+first, implement the function, run meaningful checks using the available Python,
+and update .agent/STATE.md. Keep the change focused. The independent verifier will
+run after you finish and is not accessible from your workspace.

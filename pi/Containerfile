@@ -1,0 +1,18 @@
+ARG NODE_IMAGE=safe-pi-node:24-83f1c388
+FROM ${NODE_IMAGE}
+COPY .build/packages/apk /tmp/apk
+RUN apk add --no-network /tmp/apk/*.apk \
+    && rm -rf /tmp/apk /var/cache/apk/* \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack
+COPY .build/packages/app /opt/pi
+COPY bridge.mjs entrypoint.sh /opt/safe-pi/
+COPY policy /opt/safe-pi/policy
+RUN mkdir -p /workspace /sessions /home/pi \
+    && chown 1000:1000 /workspace /sessions /home/pi \
+    && chmod 755 /opt/safe-pi/entrypoint.sh
+ENV HOME=/home/pi SHELL=/bin/bash PI_OFFLINE=1 PI_TELEMETRY=0 \
+    PI_CODING_AGENT_DIR=/home/pi/.pi/agent PYTHONDONTWRITEBYTECODE=1
+USER 1000:1000
+WORKDIR /workspace
+ENTRYPOINT ["/opt/safe-pi/entrypoint.sh"]

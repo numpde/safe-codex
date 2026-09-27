@@ -1,0 +1,21 @@
+{
+  "defaultProvider": "local",
+  "defaultModel": "qwen3.8-27b",
+  "defaultThinkingLevel": "xhigh",
+  "defaultProjectTrust": "never",
+  "cacheWarming": "off",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 12000,
+    "modelOverrides": {
+      "local/qwen3.8-flash-next": {"reserveTokens": 65536, "keepRecentTokens": 32768}
+    }
+  },
+  "retry": {"enabled": true, "maxRetries": 1},
+  "packages": [],
+  "extensions": [],
+  "skills": [],
+  "prompts": [],
+  "themes": []
+}

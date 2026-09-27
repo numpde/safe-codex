@@ -1,0 +1,42 @@
+{
+  "providers": {
+    "local": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "local-no-secret",
+      "models": [{
+        "id": "qwen3.8-27b",
+        "name": "Local Qwen3.8 27B",
+        "reasoning": true,
+        "input": ["text"],
+        "contextWindow": 65536,
+        "maxTokens": 16384,
+        "thinkingLevelMap": {"minimal": null, "low": "low", "medium": "medium", "high": null, "xhigh": "xhigh", "max": null},
+        "samplingParams": {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "min_p": 0},
+        "compat": {
+          "supportsStore": false,
+          "supportsDeveloperRole": false,
+          "supportsReasoningEffort": true,
+          "thinkingFormat": "chat-template",
+          "chatTemplateKwargs": {"enable_thinking": true, "preserve_thinking": true, "reasoning_effort": "xhigh"},
+          "requiresReasoningContentOnAssistantMessages": true,
+          "maxTokensField": "max_tokens"
+        }
+      }, {
+        "id": "qwen3.8-flash-next",
+        "name": "Local Qwen3.8 Flash Next",
+        "reasoning": true,
+        "input": ["text"],
+        "contextWindow": 262144,
+        "maxTokens": 16384,
+        "thinkingLevelMap": {"minimal": null, "low": "low", "medium": "medium", "high": null, "xhigh": "xhigh", "max": null},
+        "samplingParams": {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "min_p": 0},
+        "compat": {
+          "supportsStore": false, "supportsDeveloperRole": false, "supportsReasoningEffort": true,
+          "thinkingFormat": "chat-template", "chatTemplateKwargs": {"enable_thinking": true, "preserve_thinking": true, "reasoning_effort": "xhigh"},
+          "requiresReasoningContentOnAssistantMessages": true, "maxTokensField": "max_tokens"
+        }
+      }]
+    }
+  }
+}

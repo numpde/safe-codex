@@ -25,6 +25,7 @@ Supported platforms:
   Linux x86_64, Linux arm64, macOS x86_64, macOS arm64.
 
 Downloader environment:
+  SAFE_CODEX_DOWNLOAD_INTERFACE           Network interface or source address.
   SAFE_CODEX_DOWNLOAD_RETRIES             Default: 8.
   SAFE_CODEX_DOWNLOAD_RETRY_DELAY         Default: 2 seconds.
   SAFE_CODEX_DOWNLOAD_CONNECT_TIMEOUT     Default: 15 seconds.
@@ -118,6 +119,23 @@ sleep_between_download_tools() {
   sleep "$download_retry_delay"
 }
 
+resolve_download_source_address() {
+  local interface="$1"
+  local address
+
+  if command -v ip >/dev/null 2>&1 && ip link show dev "$interface" >/dev/null 2>&1; then
+    address="$(ip -o -4 addr show dev "$interface" 2>/dev/null | awk 'NR == 1 { sub(/\/.*/, "", $4); print $4 }')"
+  elif command -v ifconfig >/dev/null 2>&1 && ifconfig "$interface" >/dev/null 2>&1; then
+    address="$(ifconfig "$interface" 2>/dev/null | awk '/inet / { print $2; exit }')"
+  else
+    printf '%s\n' "$interface"
+    return 0
+  fi
+
+  [[ -n "${address:-}" ]] || return 1
+  printf '%s\n' "$address"
+}
+
 download_with_curl() {
   local url="$1"
   local dest="$2"
@@ -148,6 +166,10 @@ download_with_curl() {
     args+=(--retry-all-errors)
   fi
 
+  if [[ -n "$download_interface" ]]; then
+    args+=(--interface "$download_interface")
+  fi
+
   if curl "${args[@]}" "$url"; then
     [[ -s "$partial" ]] || return 1
     mv "$partial" "$dest"
@@ -162,6 +184,7 @@ download_with_wget() {
   local url="$1"
   local dest="$2"
   local partial="$dest.partial"
+  local source_address
   local -a args
 
   command -v wget >/dev/null 2>&1 || return 127
@@ -185,6 +208,14 @@ download_with_wget() {
 
   if wget_has_option "--secure-protocol"; then
     args+=(--secure-protocol=TLSv1_2)
+  fi
+
+  if [[ -n "$download_interface" ]]; then
+    source_address="$(resolve_download_source_address "$download_interface")" || {
+      printf 'cannot resolve download interface %s to a source address for wget\n' "$download_interface" >&2
+      return 1
+    }
+    args+=(--bind-address="$source_address")
   fi
 
   if wget "${args[@]}" "$url"; then
@@ -297,6 +328,7 @@ backup_existing_launcher() {
 version="${CODEX_VERSION:-0.130.0}"
 install_root="${CODEX_INSTALL_ROOT:-$HOME/.local/share/codex-cli}"
 bin_dir="${CODEX_BIN_DIR:-$HOME/.local/bin}"
+download_interface="${SAFE_CODEX_DOWNLOAD_INTERFACE:-}"
 download_retries="${SAFE_CODEX_DOWNLOAD_RETRIES:-8}"
 download_retry_delay="${SAFE_CODEX_DOWNLOAD_RETRY_DELAY:-2}"
 download_connect_timeout="${SAFE_CODEX_DOWNLOAD_CONNECT_TIMEOUT:-15}"
@@ -385,6 +417,9 @@ if [[ "$dry_run" == 1 ]]; then
   printf '  from:    %s\n' "$metadata_url"
   printf '  into:    %s\n' "$target_dir"
   printf '  launcher:%s\n' " $launcher"
+  if [[ -n "$download_interface" ]]; then
+    printf '  interface: %s\n' "$download_interface"
+  fi
   exit 0
 fi
 

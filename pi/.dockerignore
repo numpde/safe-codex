@@ -1,0 +1,12 @@
+*
+!Containerfile
+!.build/
+!.build/packages/
+!.build/packages/apk/
+!.build/packages/apk/**
+!.build/packages/app/
+!.build/packages/app/**
+!bridge.mjs
+!entrypoint.sh
+!policy/
+!policy/**
