@@ -1,0 +1,29 @@
+ARG NODE_IMAGE=node:24-bookworm-slim
+FROM ${NODE_IMAGE}
+
+ARG PI_VERSION=0.84.2
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        git \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pi does not require install scripts. Pin the reviewed release and remove
+# package-manager entrypoints so an agent cannot install extensions at runtime.
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && npm cache clean --force \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+    && mkdir -p /home/codex/.pi/agent \
+    && chown -R node:node /home/codex
+
+ENV HOME=/home/codex \
+    PI_CODING_AGENT_DIR=/home/codex/.pi/agent \
+    PI_SKIP_VERSION_CHECK=1
+
+USER node
+WORKDIR /workspace
+
+ENTRYPOINT ["pi"]

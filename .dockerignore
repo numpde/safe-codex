@@ -1,5 +1,7 @@
-.git
-.DS_Store
-*.log
-tmp
-cache
+*
+!Containerfile
+!Containerfile.deepseek
+!Containerfile.pi
+!Containerfile.proxy
+!proxy/
+!proxy/squid-nonlocal.conf

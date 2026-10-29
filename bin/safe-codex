@@ -15,10 +15,10 @@ load_env_file() {
     if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
       key="${BASH_REMATCH[1]}"
       case "$key" in
-        SAFE_CODEX_*|OPENAI_API_KEY) ;;
+        SAFE_CODEX_ENGINE|SAFE_CODEX_IMAGE|SAFE_CODEX_PROXY_IMAGE|SAFE_CODEX_PROFILE|SAFE_CODEX_NETWORK|SAFE_CODEX_PROXY_MODE|SAFE_CODEX_EXTERNAL_NETWORK|SAFE_CODEX_WORKSPACE|SAFE_CODEX_WORKSPACE_MODE|SAFE_CODEX_GPU|SAFE_CODEX_AMD_IGPU_RENDER|SAFE_CODEX_MEMORY|SAFE_CODEX_CPUS|SAFE_CODEX_PIDS_LIMIT|SAFE_CODEX_VERSION|ANTHROPIC_API_KEY|OPENAI_API_KEY|DEEPSEEK_API_KEY|GEMINI_API_KEY|OPENROUTER_API_KEY) ;;
         *)
           printf 'safe-codex: refusing unsupported key in %s: %s\n' "$file" "$key" >&2
-          printf 'safe-codex: .env may define SAFE_CODEX_* and OPENAI_API_KEY only\n' >&2
+          printf 'safe-codex: .env may define only keys documented in safe-codex.env.example\n' >&2
           exit 1
           ;;
       esac
@@ -49,20 +49,56 @@ die() {
   exit 1
 }
 
+validate_engine_environment() {
+  local endpoint
+  local variable
+  local -a redirect_variables=()
+
+  case "$ENGINE" in
+    docker)
+      redirect_variables=(
+        DOCKER_HOST
+        DOCKER_CONTEXT
+        DOCKER_TLS_VERIFY
+        DOCKER_CERT_PATH
+      )
+      ;;
+    podman)
+      redirect_variables=(
+        CONTAINER_HOST
+        CONTAINER_CONNECTION
+        CONTAINER_SSHKEY
+      )
+      ;;
+  esac
+
+  for variable in "${redirect_variables[@]}"; do
+    if [[ -n "${!variable:-}" ]]; then
+      die "$variable is set; refusing an ambient engine redirect. Unset it and select the intended local engine explicitly."
+    fi
+  done
+
+  if [[ "$ENGINE" == "docker" ]]; then
+    endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" ||
+      die "cannot inspect the selected Docker context; refusing to use an unverified engine endpoint"
+    [[ "$endpoint" == unix://* ]] ||
+      die "selected Docker context uses '$endpoint'; refusing a non-local engine endpoint"
+  fi
+}
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage:
-  safe-codex [--engine podman|docker] build [--codex-version VERSION]
-  safe-codex [--engine docker] pi [build [--prepare|--offline] | PI_OPTIONS...]
-  safe-codex [--engine podman|docker] run [options] [-- CODEX_ARGS...]
-  safe-codex [--engine podman|docker] shell [options]
-  safe-codex [--engine podman|docker] attach [--profile NAME]
-  safe-codex [--engine podman|docker] stop [--profile NAME]
-  safe-codex [--engine podman|docker] rm [--profile NAME]
-  safe-codex [--engine podman|docker] proxy start|stop|status [--mode nonlocal|openai]
-  safe-codex [--engine podman|docker] profiles
-  safe-codex [--engine podman|docker] doctor
-  safe-codex [--engine podman|docker] status
+  $CLI_NAME [--engine podman|docker] build [$BUILD_VERSION_OPTION VERSION]
+  $CLI_NAME [--engine podman|docker] run [options] [-- $TOOL_ARGS_NAME...]
+  $CLI_NAME [--engine podman|docker] shell [options]
+  $CLI_NAME [--engine podman|docker] attach [--profile NAME]
+  $CLI_NAME [--engine podman|docker] stop [--profile NAME]
+  $CLI_NAME [--engine podman|docker] rm [--profile NAME]
+  $CLI_NAME [--engine podman|docker] proxy start|stop|status [--mode nonlocal|openai]
+  $CLI_NAME [--engine podman|docker] profiles
+  $CLI_NAME [--engine podman|docker] doctor
+  $CLI_NAME [--engine podman|docker] status
 
 Run options:
   --profile NAME          Persistent home/session volume suffix.
@@ -71,7 +107,7 @@ Run options:
   --workspace-ro          Mount the workspace read-only.
   --rw SRC[:DST]          Add a writable bind mount.
   --ro SRC[:DST]          Add a read-only bind mount.
-  --network MODE          proxy, openai, none, or bridge. Default: proxy.
+  --network MODE          proxy, none, bridge, or Codex-only openai. Default: proxy.
   --env-file PATH         Pass an env file to the container.
   --gpu MODE              Expose GPU devices. Default: none.
                           Modes: none, nvidia, nvidia:SELECTOR, dri:PATH,
@@ -82,18 +118,10 @@ Run options:
   --pids-limit VALUE      Default: 512.
   --allow-bridge-network  Permit --network bridge, which bypasses the proxy.
   --allow-risky-mounts    Allow /run, /var/run, /dev, /proc, /sys, ~/.ssh,
-                          ~/.codex, or mount trees containing sockets.
-
-Pi options:
-  --workspace PATH        Repository copied into an isolated writable workspace.
-  --workspace-ro          Directly mount the repository read-only, including .git.
-  --profile NAME          Saved Pi session profile.
-  --backend vllm|exl3     Local inference backend. Default: vllm.
-  --timeout SECONDS       Session limit. Default: 14400.
-  -- PI_ARGS...           Pass remaining arguments to Pi.
+                          ~/.codex, ~/.dsh, ~/.pi, or mount trees containing sockets.
 
 Notes:
-  - Default network is proxy: Codex gets Internet via a Squid proxy that blocks
+  - Default network is proxy: $TOOL_DISPLAY gets Internet via a Squid proxy that blocks
     local/private destinations.
   - openai network is stricter: only OpenAI/ChatGPT domains are allowed.
   - GPU devices are never exposed unless --gpu is passed or SAFE_CODEX_GPU is set.
@@ -102,8 +130,16 @@ Notes:
   - dri:PATH exposes one /dev/dri render node. amd-igpu uses
     SAFE_CODEX_AMD_IGPU_RENDER and fails if that variable is unset.
   - Profile names may contain only letters, numbers, dot, underscore, and dash.
-  - Do not mount host ~/.codex. The container uses a named persistent volume.
+  - Do not mount host $TOOL_STATE_HOME.
 EOF
+  if [[ "$TOOL" == codex ]]; then
+    cat <<'EOF'
+
+Local inference Pi:
+  safe-codex --engine docker pi [build [--prepare|--offline] | PI_OPTIONS...]
+  Run safe-codex --engine docker pi --help for local Pi options.
+EOF
+  fi
 }
 
 engine_default() {
@@ -119,17 +155,24 @@ engine_default() {
 }
 
 ENGINE="$(engine_default)"
+TOOL=codex
+SHOW_HELP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --tool)
+      [[ $# -ge 2 ]] || die "--tool requires codex, deepseek, or pi"
+      TOOL="$2"
+      shift 2
+      ;;
     --engine)
       [[ $# -ge 2 ]] || die "--engine requires podman or docker"
       ENGINE="$2"
       shift 2
       ;;
     --help|-h)
-      usage
-      exit 0
+      SHOW_HELP=1
+      shift
       ;;
     *)
       break
@@ -137,19 +180,71 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$TOOL" in
+  codex)
+    CLI_NAME=safe-codex
+    TOOL_DISPLAY=Codex
+    TOOL_ARGS_NAME=CODEX_ARGS
+    TOOL_STATE_HOME='~/.codex'
+    BUILD_VERSION_OPTION="--codex-version"
+    IMAGE_DEFAULT=safe-codex:latest
+    CONTAINER_PREFIX=safe-codex
+    STATE_PATH=/home/codex/.codex
+    WORKSPACE_MODE_DEFAULT=rw
+    DOCKERFILE="$ROOT_DIR/Containerfile"
+    ;;
+  deepseek)
+    CLI_NAME=safe-deepseek
+    TOOL_DISPLAY="DeepSeek Harness"
+    TOOL_ARGS_NAME=DSH_ARGS
+    TOOL_STATE_HOME='~/.dsh'
+    BUILD_VERSION_OPTION="--dsh-version"
+    IMAGE_DEFAULT=safe-deepseek:latest
+    CONTAINER_PREFIX=safe-deepseek
+    STATE_PATH=/home/codex/.dsh
+    WORKSPACE_MODE_DEFAULT=ro
+    DOCKERFILE="$ROOT_DIR/Containerfile.deepseek"
+    ;;
+  pi)
+    CLI_NAME=safe-pi
+    TOOL_DISPLAY="Pi Agent Harness"
+    TOOL_ARGS_NAME=PI_ARGS
+    TOOL_STATE_HOME='~/.pi/agent'
+    BUILD_VERSION_OPTION="--pi-version"
+    IMAGE_DEFAULT=safe-pi:latest
+    CONTAINER_PREFIX=safe-pi
+    STATE_PATH=/home/codex/.pi/agent
+    WORKSPACE_MODE_DEFAULT=ro
+    DOCKERFILE="$ROOT_DIR/Containerfile.pi"
+    ;;
+  *)
+    die "unknown tool: $TOOL"
+    ;;
+esac
+
+if [[ "$SHOW_HELP" == 1 ]]; then
+  usage
+  exit 0
+fi
+
 command -v "$ENGINE" >/dev/null 2>&1 || die "$ENGINE is not installed or not on PATH"
+validate_engine_environment
 
 SUBCOMMAND="${1:-}"
 [[ -n "$SUBCOMMAND" ]] || { usage; exit 1; }
 shift || true
 
-IMAGE="${SAFE_CODEX_IMAGE:-safe-codex:latest}"
+if [[ "$TOOL" == codex ]]; then
+  IMAGE="${SAFE_CODEX_IMAGE:-$IMAGE_DEFAULT}"
+else
+  IMAGE="$IMAGE_DEFAULT"
+fi
 PROXY_IMAGE="${SAFE_CODEX_PROXY_IMAGE:-safe-codex-proxy:latest}"
 PROFILE="${SAFE_CODEX_PROFILE:-default}"
 NETWORK_MODE="${SAFE_CODEX_NETWORK:-proxy}"
 PROXY_MODE="${SAFE_CODEX_PROXY_MODE:-nonlocal}"
 WORKSPACE="${SAFE_CODEX_WORKSPACE:-$PWD}"
-WORKSPACE_MODE="${SAFE_CODEX_WORKSPACE_MODE:-rw}"
+WORKSPACE_MODE="${SAFE_CODEX_WORKSPACE_MODE:-$WORKSPACE_MODE_DEFAULT}"
 GPU_MODE="${SAFE_CODEX_GPU:-none}"
 MEMORY="${SAFE_CODEX_MEMORY:-2g}"
 CPUS="${SAFE_CODEX_CPUS:-2}"
@@ -175,6 +270,14 @@ validate_profile_name() {
   fi
 }
 
+validate_npm_version() {
+  local option="$1"
+  local version="$2"
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+    die "$option requires an exact semantic version, got: $version"
+  fi
+}
+
 validate_proxy_mode() {
   case "$PROXY_MODE" in
     nonlocal|openai) ;;
@@ -187,13 +290,13 @@ container_name() {
   if [[ -n "$CONTAINER_NAME" ]]; then
     printf '%s\n' "$CONTAINER_NAME"
   else
-    printf 'safe-codex-%s\n' "$(safe_name "$PROFILE")"
+    printf '%s-%s\n' "$CONTAINER_PREFIX" "$(safe_name "$PROFILE")"
   fi
 }
 
 state_volume() {
   validate_profile_name "$PROFILE"
-  printf 'safe-codex-state-%s\n' "$(safe_name "$PROFILE")"
+  printf '%s-state-%s\n' "$CONTAINER_PREFIX" "$(safe_name "$PROFILE")"
 }
 
 network_name() {
@@ -235,8 +338,24 @@ engine_has_network() {
   "$ENGINE" network inspect "$1" >/dev/null 2>&1
 }
 
+engine_network_label() {
+  local network="$1"
+  local label="$2"
+  "$ENGINE" network inspect -f "{{ index .Labels \"$label\" }}" "$network" 2>/dev/null || true
+}
+
+engine_network_internal() {
+  "$ENGINE" network inspect -f '{{.Internal}}' "$1" 2>/dev/null || true
+}
+
 engine_has_volume() {
   "$ENGINE" volume inspect "$1" >/dev/null 2>&1
+}
+
+engine_volume_label() {
+  local volume="$1"
+  local label="$2"
+  "$ENGINE" volume inspect -f "{{ index .Labels \"$label\" }}" "$volume" 2>/dev/null || true
 }
 
 engine_image_id() {
@@ -247,6 +366,23 @@ engine_container_label() {
   local container="$1"
   local label="$2"
   "$ENGINE" inspect -f "{{ index .Config.Labels \"$label\" }}" "$container" 2>/dev/null || true
+}
+
+validate_container_ownership() {
+  local container="$1"
+  local role profile
+  role="$(engine_container_label "$container" org.safe-codex.role)"
+  profile="$(engine_container_label "$container" org.safe-codex.profile)"
+  [[ "$role" == "$TOOL" ]] || die "refusing container not owned by $CLI_NAME: $container"
+  [[ "$profile" == "$PROFILE" ]] || die "refusing container with profile label '$profile', expected '$PROFILE': $container"
+}
+
+validate_proxy_ownership() {
+  local proxy="$1"
+  [[ "$(engine_container_label "$proxy" org.safe-codex.role)" == proxy ]] || \
+    die "refusing proxy container without safe-codex ownership: $proxy"
+  [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-mode)" == "$PROXY_MODE" ]] || \
+    die "refusing proxy container owned by another mode: $proxy"
 }
 
 ensure_image() {
@@ -260,15 +396,52 @@ ensure_proxy_image() {
 ensure_network() {
   local net="$1"
   if ! engine_has_network "$net"; then
-    "$ENGINE" network create --internal "$net" >/dev/null
+    "$ENGINE" network create --internal \
+      --label org.safe-codex.role=network \
+      --label org.safe-codex.network-kind=agent \
+      --label "org.safe-codex.proxy-mode=$PROXY_MODE" \
+      "$net" >/dev/null
   fi
+  validate_managed_network "$net" agent true
 }
 
 ensure_egress_network() {
   local net="$1"
   if ! engine_has_network "$net"; then
-    "$ENGINE" network create "$net" >/dev/null
+    "$ENGINE" network create \
+      --label org.safe-codex.role=network \
+      --label org.safe-codex.network-kind=egress \
+      --label "org.safe-codex.proxy-mode=$PROXY_MODE" \
+      "$net" >/dev/null
   fi
+  validate_managed_network "$net" egress false
+}
+
+validate_managed_network() {
+  local net="$1"
+  local kind="$2"
+  local expected_internal="$3"
+  local actual_internal role
+  actual_internal="$(engine_network_internal "$net")"
+  [[ "$actual_internal" == "$expected_internal" ]] || \
+    die "refusing network with unexpected internal=$actual_internal, expected $expected_internal: $net"
+
+  role="$(engine_network_label "$net" org.safe-codex.role)"
+  if [[ -z "$role" ]]; then
+    return 0
+  fi
+  [[ "$role" == network ]] || die "refusing network without safe-codex ownership: $net"
+  [[ "$(engine_network_label "$net" org.safe-codex.network-kind)" == "$kind" ]] || \
+    die "refusing network owned for another purpose: $net"
+  [[ "$(engine_network_label "$net" org.safe-codex.proxy-mode)" == "$PROXY_MODE" ]] || \
+    die "refusing network owned by another proxy mode: $net"
+}
+
+require_external_network() {
+  local net="$1"
+  engine_has_network "$net" || die "external network does not exist: $net"
+  [[ "$(engine_network_internal "$net")" == false ]] || \
+    die "external network must provide egress, but is internal: $net"
 }
 
 volume_mount_spec() {
@@ -284,7 +457,23 @@ volume_mount_spec() {
 ensure_state_volume() {
   local volume="$1"
   if ! engine_has_volume "$volume"; then
-    "$ENGINE" volume create "$volume" >/dev/null
+    if [[ "$TOOL" != codex ]]; then
+      "$ENGINE" volume create \
+        --label org.safe-codex.role=state \
+        --label "org.safe-codex.tool=$TOOL" \
+        --label "org.safe-codex.profile=$PROFILE" \
+        "$volume" >/dev/null
+    else
+      "$ENGINE" volume create "$volume" >/dev/null
+    fi
+  fi
+  if [[ "$TOOL" != codex ]]; then
+    [[ "$(engine_volume_label "$volume" org.safe-codex.role)" == state ]] || \
+      die "refusing $TOOL_DISPLAY state volume without safe-codex ownership: $volume"
+    [[ "$(engine_volume_label "$volume" org.safe-codex.tool)" == "$TOOL" ]] || \
+      die "refusing state volume owned by another tool: $volume"
+    [[ "$(engine_volume_label "$volume" org.safe-codex.profile)" == "$PROFILE" ]] || \
+      die "refusing state volume owned by another profile: $volume"
   fi
   local args=(
     --rm
@@ -303,20 +492,20 @@ ensure_state_volume() {
     args+=(--userns=keep-id --user "$(id -u):$(id -g)")
     "$ENGINE" run "${args[@]}" "$IMAGE" -c "chmod 700 /state"
   else
-    args+=(--user 0:0 --cap-add CHOWN)
+    args+=(--user 0:0 --cap-add CHOWN --cap-add FOWNER)
     "$ENGINE" run "${args[@]}" "$IMAGE" -c "chown -R $(id -u):$(id -g) /state && chmod 700 /state"
   fi
 }
 
 is_risky_mount_root() {
   local path="$1"
-  local host_home="${SAFE_CODEX_HOST_HOME:-$HOME}"
+  local host_home="$HOME"
   host_home="$(realpath -m -- "$host_home")"
   case "$path" in
     /|/home|/root|"$host_home"|/run|/run/*|/var/run|/var/run/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*)
       return 0
       ;;
-    "$host_home/.ssh"|"$host_home/.ssh/"*|"$host_home/.codex"|"$host_home/.codex/"*)
+    "$host_home/.ssh"|"$host_home/.ssh/"*|"$host_home/.codex"|"$host_home/.codex/"*|"$host_home/.dsh"|"$host_home/.dsh/"*|"$host_home/.pi"|"$host_home/.pi/"*)
       return 0
       ;;
   esac
@@ -566,9 +755,14 @@ proxy_start() {
   recreate=0
 
   ensure_network "$net"
-  ensure_egress_network "$ext"
+  if [[ -n "${SAFE_CODEX_EXTERNAL_NETWORK:-}" ]]; then
+    require_external_network "$ext"
+  else
+    ensure_egress_network "$ext"
+  fi
 
   if engine_has_container "$proxy"; then
+    validate_proxy_ownership "$proxy"
     if [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-config-sha256)" != "$config_sha" ]] ||
       [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-image-id)" != "$image_id" ]] ||
       [[ "$(engine_container_label "$proxy" org.safe-codex.proxy-mode)" != "$PROXY_MODE" ]] ||
@@ -627,7 +821,8 @@ proxy_stop() {
   local proxy
   proxy="$(proxy_name)"
   if engine_has_container "$proxy"; then
-    "$ENGINE" stop "$proxy" >/dev/null || true
+    validate_proxy_ownership "$proxy"
+    "$ENGINE" stop "$proxy" >/dev/null
   fi
 }
 
@@ -636,6 +831,7 @@ proxy_status() {
   local proxy
   proxy="$(proxy_name)"
   if engine_has_container "$proxy"; then
+    validate_proxy_ownership "$proxy"
     "$ENGINE" ps -a --filter "name=^/${proxy}$"
   else
     printf 'proxy container not found: %s\n' "$proxy"
@@ -731,14 +927,34 @@ run_container() {
   local entrypoint="$1"
   shift
 
+  [[ "$(id -u)" != 0 ]] || die "refusing to run $TOOL_DISPLAY as host root"
+
   CMD_ARGS=()
   parse_run_options "$@"
+
+  if [[ "$TOOL" == pi ]]; then
+    local argument credential credential_count=0
+    for argument in "${CMD_ARGS[@]}"; do
+      [[ "$argument" != --approve && "$argument" != -a ]] || \
+        die "Pi project approval is disabled because project extensions execute with access to the workspace and provider credential"
+    done
+    for credential in ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do
+      [[ -z "${!credential:-}" ]] || credential_count=$((credential_count + 1))
+    done
+    (( credential_count <= 1 )) || die "Pi received multiple provider API keys; expose only the credential required for this run"
+    CMD_ARGS=(--no-approve "${CMD_ARGS[@]}")
+  fi
+
+  if [[ "$TOOL" != codex && -n "$ENV_FILE" ]]; then
+    die "--env-file is not supported for $TOOL_DISPLAY; export one documented provider API key and use documented SAFE_CODEX_* settings"
+  fi
 
   local name volume
   name="$(container_name)"
   volume="$(state_volume)"
 
   if engine_has_container "$name"; then
+    validate_container_ownership "$name"
     if engine_container_running "$name"; then
       printf 'attaching to running container: %s\n' "$name" >&2
       exec "$ENGINE" attach "$name"
@@ -758,6 +974,7 @@ run_container() {
       PROXY_MODE=nonlocal
       ;;
     openai)
+      [[ "$TOOL" != deepseek ]] || die "--network openai allows OpenAI endpoints, not DeepSeek; use --network proxy"
       PROXY_MODE=openai
       ;;
     none)
@@ -781,10 +998,13 @@ run_container() {
   esac
 
   if engine_has_container "$name"; then
+    validate_container_ownership "$name"
     "$ENGINE" rm "$name" >/dev/null
   fi
 
-  ensure_state_volume "$volume"
+  if [[ "$TOOL" != pi ]]; then
+    ensure_state_volume "$volume"
+  fi
 
   case "$NETWORK_MODE" in
     proxy|openai)
@@ -806,19 +1026,37 @@ run_container() {
     --rm
     -it
     --name "$name"
-    --label org.safe-codex.role=codex
+    --label "org.safe-codex.role=$TOOL"
     --label "org.safe-codex.profile=$PROFILE"
-    --hostname safe-codex
+    --hostname "$CONTAINER_PREFIX"
     --workdir /workspace
     --tmpfs "$(home_tmpfs_spec)"
-    --mount "$(volume_mount_spec "$volume" /home/codex/.codex)"
     --mount "$workspace_mount"
     -e HOME=/home/codex
     -e TERM="${TERM:-xterm-256color}"
   )
 
-  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+  if [[ "$TOOL" != pi ]]; then
+    args+=(--mount "$(volume_mount_spec "$volume" "$STATE_PATH")")
+  fi
+
+  if [[ "$TOOL" == codex && -n "${OPENAI_API_KEY:-}" ]]; then
     args+=(-e OPENAI_API_KEY)
+  fi
+
+  if [[ "$TOOL" == deepseek ]]; then
+    args+=(-e DSH_HOME="$STATE_PATH")
+    if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
+      args+=(-e DEEPSEEK_API_KEY)
+    fi
+  fi
+
+  if [[ "$TOOL" == pi ]]; then
+    for credential in ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do
+      if [[ -n "${!credential:-}" ]]; then
+        args+=(-e "$credential")
+      fi
+    done
   fi
 
   if [[ -n "$ENV_FILE" ]]; then
@@ -870,17 +1108,40 @@ run_container() {
 
 build_images() {
   local codex_version="${SAFE_CODEX_VERSION:-0.130.0}"
+  local dsh_version=""
+  local pi_version=""
+  local build_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --codex-version)
+        [[ "$TOOL" == codex ]] || die "--codex-version is valid only for safe-codex"
         [[ $# -ge 2 ]] || die "--codex-version requires a value"
         codex_version="$2"; shift 2 ;;
+      --dsh-version)
+        [[ "$TOOL" == deepseek ]] || die "--dsh-version is valid only for safe-deepseek"
+        [[ $# -ge 2 ]] || die "--dsh-version requires a value"
+        dsh_version="$2"; shift 2 ;;
+      --pi-version)
+        [[ "$TOOL" == pi ]] || die "--pi-version is valid only for safe-pi"
+        [[ $# -ge 2 ]] || die "--pi-version requires a value"
+        pi_version="$2"; shift 2 ;;
       *)
         die "unknown build option: $1" ;;
     esac
   done
-  "$ENGINE" build --pull -f "$ROOT_DIR/Containerfile" \
-    --build-arg "CODEX_VERSION=$codex_version" \
+  if [[ "$TOOL" == codex ]]; then
+    validate_npm_version --codex-version "$codex_version"
+    build_args=(--build-arg "CODEX_VERSION=$codex_version")
+  elif [[ -n "$dsh_version" ]]; then
+    validate_npm_version --dsh-version "$dsh_version"
+    build_args=(--build-arg "DSH_VERSION=$dsh_version")
+  elif [[ -n "$pi_version" ]]; then
+    validate_npm_version --pi-version "$pi_version"
+    build_args=(--build-arg "PI_VERSION=$pi_version")
+  fi
+  [[ -f "$DOCKERFILE" ]] || die "dockerfile not found: $DOCKERFILE"
+  "$ENGINE" build --pull -f "$DOCKERFILE" \
+    "${build_args[@]}" \
     -t "$IMAGE" "$ROOT_DIR"
   "$ENGINE" build --pull -f "$ROOT_DIR/Containerfile.proxy" \
     -t "$PROXY_IMAGE" "$ROOT_DIR"
@@ -901,6 +1162,7 @@ attach_container() {
   local name
   name="$(container_name)"
   engine_has_container "$name" || die "container does not exist: $name"
+  validate_container_ownership "$name"
   engine_container_running "$name" || die "container is not running: $name"
   exec "$ENGINE" attach "$name"
 }
@@ -920,7 +1182,8 @@ stop_container() {
   local name
   name="$(container_name)"
   if engine_has_container "$name"; then
-    "$ENGINE" stop "$name" >/dev/null || true
+    validate_container_ownership "$name"
+    "$ENGINE" stop "$name" >/dev/null
   fi
 }
 
@@ -939,19 +1202,20 @@ rm_container() {
   local name
   name="$(container_name)"
   if engine_has_container "$name"; then
-    "$ENGINE" rm -f "$name" >/dev/null || true
+    validate_container_ownership "$name"
+    "$ENGINE" rm -f "$name" >/dev/null
   fi
 }
 
 status_all() {
   local items
   printf 'engine: %s\n' "$ENGINE"
-  printf 'codex image: %s ' "$IMAGE"
+  printf '%s image: %s ' "$TOOL" "$IMAGE"
   engine_has_image "$IMAGE" && printf '(present)\n' || printf '(missing)\n'
   printf 'proxy image: %s ' "$PROXY_IMAGE"
   engine_has_image "$PROXY_IMAGE" && printf '(present)\n' || printf '(missing)\n'
-  "$ENGINE" ps -a --filter 'name=^/safe-codex' || true
-  items="$("$ENGINE" volume ls --filter 'name=safe-codex-state' --format '{{.Name}}' 2>/dev/null || true)"
+  "$ENGINE" ps -a --filter "name=^/${CONTAINER_PREFIX}" || true
+  items="$("$ENGINE" volume ls --filter "name=${CONTAINER_PREFIX}-state" --format '{{.Name}}' 2>/dev/null || true)"
   if [[ -n "$items" ]]; then
     printf 'state volumes:\n%s\n' "$items"
   fi
@@ -968,18 +1232,18 @@ status_all() {
 list_profiles() {
   local volumes ids id name profile status
   printf 'state volumes:\n'
-  volumes="$("$ENGINE" volume ls --filter 'name=safe-codex-state-' --format '{{.Name}}' 2>/dev/null || true)"
+  volumes="$("$ENGINE" volume ls --filter "name=${CONTAINER_PREFIX}-state-" --format '{{.Name}}' 2>/dev/null || true)"
   if [[ -n "$volumes" ]]; then
     printf '%s\n' "$volumes" | sort | while IFS= read -r volume; do
       [[ -n "$volume" ]] || continue
-      printf '  %s\n' "${volume#safe-codex-state-}"
+      printf '  %s\n' "${volume#"$CONTAINER_PREFIX-state-"}"
     done
   else
     printf '  (none)\n'
   fi
 
-  printf 'codex containers:\n'
-  ids="$("$ENGINE" ps -a --filter 'label=org.safe-codex.role=codex' --format '{{.ID}}' 2>/dev/null || true)"
+  printf '%s containers:\n' "$TOOL"
+  ids="$("$ENGINE" ps -a --filter "label=org.safe-codex.role=$TOOL" --format '{{.ID}}' 2>/dev/null || true)"
   if [[ -n "$ids" ]]; then
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
@@ -995,7 +1259,7 @@ list_profiles() {
 
 doctor() {
   local engine_ok workspace_real config_ok=1 missing=0 security_options device
-  printf 'safe-codex doctor\n'
+  printf '%s doctor\n' "$CLI_NAME"
   printf 'engine: %s\n' "$ENGINE"
   if "$ENGINE" --version >/dev/null 2>&1; then
     printf 'engine version: %s\n' "$("$ENGINE" --version)"
@@ -1024,7 +1288,7 @@ doctor() {
     printf 'engine isolation: podman%s\n' "$(id -u | grep -qx 0 && printf ' as root' || printf ' rootless user')"
   fi
 
-  printf 'codex image: %s ' "$IMAGE"
+  printf '%s image: %s ' "$TOOL" "$IMAGE"
   if [[ "$engine_ok" == 1 ]] && engine_has_image "$IMAGE"; then
     printf '(present)\n'
   else
@@ -1064,7 +1328,13 @@ doctor() {
     proxy)
       printf 'default network: proxy via nonlocal destination filter\n' ;;
     openai)
-      printf 'default network: openai allowlist proxy\n' ;;
+      if [[ "$TOOL" != deepseek ]]; then
+        printf 'default network: openai allowlist proxy\n'
+      else
+        printf 'default network: invalid for DeepSeek; use proxy, none, or bridge\n'
+        config_ok=0
+      fi
+      ;;
     none)
       printf 'default network: none\n' ;;
     bridge)
@@ -1133,6 +1403,7 @@ case "$SUBCOMMAND" in
     printf '%s\n' "$WORKSPACE"
     ;;
   pi)
+    [[ "$TOOL" == codex ]] || die "local Pi is available through safe-codex pi"
     [[ "$ENGINE" == docker ]] || die "Pi currently requires Docker"
     if [[ "${1:-}" == build ]]; then
       shift

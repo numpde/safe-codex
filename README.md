@@ -21,6 +21,82 @@ Full documentation is published at <https://numpde.github.io/safe-codex/>.
 ./bin/safe-codex-podman profiles
 ```
 
+The DeepSeek lane runs DeepSeek's official developer-preview Harness (`dsh`).
+Export only the credential that Harness consumes, then run a one-shot headless
+task. The workspace is read-only unless you explicitly grant write access.
+
+```bash
+export DEEPSEEK_API_KEY=...
+./bin/safe-deepseek-podman doctor
+./bin/safe-deepseek-podman build
+./bin/safe-deepseek-podman run --workspace-ro --network proxy -- \
+  --profile headless "Summarize this repository"
+```
+
+Use `--workspace-rw` only for a task that should edit the checkout. Harness state
+is kept in a dedicated `safe-deepseek-state-*` volume mounted at `~/.dsh`; host
+`~/.dsh` is never mounted. The image installs the pinned official
+`@deepseek-ai/dsh` package and removes npm, npx, and corepack from the runtime.
+The pinned preview currently needs Node's `--expose-internals` startup flag when
+its native loader fallback is unavailable. The image grants that flag only to
+the Harness process; it is not inherited by commands the agent starts.
+The Harness release is pinned, but builds still refresh the base image and
+Debian packages; this lane does not claim bit-reproducible supply-chain output.
+
+```bash
+./bin/safe-deepseek-podman run --workspace-rw --network proxy -- \
+  --profile headless "Implement the requested change"
+```
+
+The Web UI is intentionally not exposed by this lane. It is an unauthenticated
+remote-code-execution surface that needs a separate loopback publication and
+browser-trust design; this launcher publishes no ports. DeepSeek Harness is in
+developer preview and may make compatibility-breaking changes. Update its pin
+explicitly:
+
+```bash
+./bin/safe-deepseek-podman build --dsh-version VERSION
+```
+
+This is containment, not a hostile-code sandbox. The Harness process and its
+commands can read the API key and every file mounted into the container. A
+read-only workspace prevents writes, not reads; the proxy blocks private/local
+destinations, not Internet exfiltration. Do not mount a checkout containing
+credentials you are unwilling to disclose to the model or executed code.
+
+Upstream: <https://github.com/deepseek-ai/deepseek-harness>
+
+The cloud-provider Pi lane (`safe-pi`) runs the official Pi Agent Harness with a read-only workspace by
+default. Its state lives only in the container's home tmpfs and disappears when
+the run exits; host `~/.pi/agent`, subscription tokens, sessions, extensions,
+and settings are not mounted. Export exactly one supported provider credential
+before running Pi:
+
+```bash
+export ANTHROPIC_API_KEY=...
+./bin/safe-pi-podman doctor
+./bin/safe-pi-podman build
+./bin/safe-pi-podman run --workspace-ro --network proxy
+```
+
+The admitted Pi credentials are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, and `OPENROUTER_API_KEY`. The launcher
+refuses to expose more than one at once. The image pins the official package,
+disables its version check, ignores npm lifecycle scripts during installation,
+and removes npm, npx, and corepack at runtime. This intentionally prevents Pi
+from installing or updating extensions inside the container. The launcher also
+injects `--no-approve` and rejects `--approve`/`-a`, so repository-controlled Pi
+extensions and settings cannot execute with the provider credential.
+
+```bash
+./bin/safe-pi-podman run --workspace-ro --network proxy -- \
+  -p "Summarize this repository"
+```
+
+Grant `--workspace-rw` only when the task should modify the checkout. Update the
+pin explicitly with `safe-pi-podman build --pi-version VERSION` after reviewing
+the upstream release. Upstream: <https://github.com/earendil-works/pi>
+
 GPU devices are not exposed by default. Use `--gpu nvidia` for all NVIDIA GPUs,
 `--gpu nvidia:0` or `--gpu nvidia:0,1` for selected NVIDIA GPUs, or
 `--gpu dri:/dev/dri/renderDNNN` for an explicit DRI render node.
@@ -51,7 +127,7 @@ SAFE_CODEX_DOWNLOAD_INTERFACE=wlp10s0 ./bin/install-native-codex-cli --version 0
 
 ## Checks
 
-The same launcher also runs the fully containerized local Pi harness:
+The main launcher also runs a separate local-inference Pi harness:
 
 ```bash
 ./bin/safe-codex --engine docker pi --backend exl3 --workspace ~/repos/project

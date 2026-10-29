@@ -22,7 +22,8 @@ bash ~/repos/proart-llm/vllm/start.sh
 ```
 
 The interface is `safe-codex --engine docker pi [options] -- [Pi arguments]`.
-`bin/safe-pi` remains a compatibility alias. Type directly into Pi; use `/quit`
+`bin/safe-pi` runs the separate cloud-provider Pi mode described in the main
+README. Type directly into local Pi; use `/quit`
 to exit. `-p` prints and exits;
 `-c` continues the previous conversation. Native flags belong after `--`.
 `--profile NAME` selects a saved sandbox (default: `default`), separately for

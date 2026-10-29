@@ -6,24 +6,43 @@ cd "$ROOT_DIR"
 
 bash -n \
   bin/safe-codex \
+  bin/safe-deepseek \
+  bin/safe-pi \
   bin/safe-codex-docker \
   bin/safe-codex-podman \
+  bin/safe-deepseek-docker \
+  bin/safe-deepseek-podman \
+  bin/safe-pi-docker \
+  bin/safe-pi-podman \
   bin/install-native-codex-cli \
   bin/install-node-package-tool-deny-stubs
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck \
     bin/safe-codex \
+    bin/safe-deepseek \
+    bin/safe-pi \
     bin/safe-codex-docker \
     bin/safe-codex-podman \
+    bin/safe-deepseek-docker \
+    bin/safe-deepseek-podman \
+    bin/safe-pi-docker \
+    bin/safe-pi-podman \
     bin/install-native-codex-cli \
     bin/install-node-package-tool-deny-stubs \
     bin/check
 fi
 
+if ! rg -Fqx 'ENTRYPOINT ["node", "--expose-internals", "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"]' Containerfile.deepseek; then
+  printf 'Containerfile.deepseek must pass --expose-internals directly to the dsh Node process\n' >&2
+  exit 1
+fi
+
 if command -v docker >/dev/null 2>&1; then
   docker build --check -f Containerfile .
   docker build --check -f Containerfile.proxy .
+  docker build --check -f Containerfile.deepseek .
+  docker build --check -f Containerfile.pi .
 
   proxy_image="${SAFE_CODEX_PROXY_IMAGE:-safe-codex-proxy:latest}"
   if docker image inspect "$proxy_image" >/dev/null 2>&1; then
