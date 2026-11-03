@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Remove older payloads that participate in the launcher's locking protocol."""
+import fcntl
+from pathlib import Path
+import re
+import shutil
+import sys
+
+VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+MARKER = '.safe-codex-managed'
+
+
+def version_number(value):
+    match = VERSION.fullmatch(value)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def cleanup(root, installed):
+    current = version_number(installed)
+    if current is None:
+        print('Skipping cleanup for a prerelease or nonstandard version.')
+        return
+    locks = root / '.locks'
+    for entry in sorted(root.iterdir()):
+        number = version_number(entry.name)
+        if number is None or number >= current or entry.is_symlink() or not entry.is_dir():
+            continue
+        marker = entry / MARKER
+        if marker.is_symlink() or not marker.is_file() or marker.read_text() != '1\n':
+            continue
+        # Lock files must outlive payload removal: launchers can still refer to them.
+        with (locks / entry.name).open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f'Keeping running version {entry.name}')
+                continue
+            print(f'Removing unused older version {entry.name}')
+            shutil.rmtree(entry)
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit('usage: cleanup-native-codex-cli INSTALL_ROOT INSTALLED_VERSION')
+    cleanup(Path(sys.argv[1]), sys.argv[2])
+
+
+if __name__ == '__main__':
+    main()

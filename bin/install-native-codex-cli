@@ -16,6 +16,7 @@ Options:
   --install-root PATH     Versioned payload root. Default: ~/.local/share/codex-cli.
   --bin-dir PATH          Directory for the codex launcher. Default: ~/.local/bin.
   --replace               Replace an existing payload for the same version.
+  --keep-old              Do not remove unused older stable versions.
   --allow-codex-update    Do not block `codex update` in the launcher.
   --no-run-check          Do not execute the installed binary for --version check.
   --dry-run               Print actions without downloading or writing files.
@@ -276,7 +277,10 @@ write_launcher() {
   local quoted_root
   local quoted_binary
   local tmp
+  local lock_path="${5:-}"
+  local quoted_lock
 
+  quoted_lock="$(shell_quote "$lock_path")"
   quoted_root="$(shell_quote "$root_path")"
   quoted_binary="$(shell_quote "$binary_path")"
   tmp="$(mktemp "$launcher.tmp.XXXXXX")"
@@ -304,6 +308,12 @@ binary=$quoted_binary
 export PATH="\$root/path:\$PATH"
 exec "\$root/\$binary" "\$@"
 EOF
+  fi
+  if [[ -n "$lock_path" ]]; then
+    # Keep the lock descriptor open in the Codex process after exec.
+    sed '$d' "$tmp" >"$tmp.locked"
+    printf 'exec 9>>%s\nflock --shared 9\nexec "$root/$binary" "$@"\n' "$quoted_lock" >>"$tmp.locked"
+    mv "$tmp.locked" "$tmp"
   fi
   chmod 700 "$tmp"
   mv "$tmp" "$launcher"
@@ -335,6 +345,7 @@ download_connect_timeout="${SAFE_CODEX_DOWNLOAD_CONNECT_TIMEOUT:-15}"
 download_max_time="${SAFE_CODEX_DOWNLOAD_MAX_TIME:-900}"
 download_retry_max_time="${SAFE_CODEX_DOWNLOAD_RETRY_MAX_TIME:-300}"
 replace_existing=0
+keep_old=0
 allow_update=0
 run_check=1
 dry_run=0
@@ -358,6 +369,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --replace)
       replace_existing=1
+      shift
+      ;;
+    --keep-old)
+      keep_old=1
       shift
       ;;
     --allow-codex-update)
@@ -441,6 +456,15 @@ staging_dir="$tmp_dir/staging"
 quarantine_root="$HOME/.quarantine"
 
 mkdir -p "$extract_dir" "$staging_dir" "$install_root" "$bin_dir" "$quarantine_root"
+
+managed_lock=""
+if [[ "$(uname -s)" == Linux ]]; then
+  need_command flock
+  mkdir -p "$install_root/.locks"
+  exec 8>>"$install_root/.locks/install"
+  flock -x 8
+  managed_lock="$install_root/.locks/$version"
+fi
 chmod 700 "$install_root" "$bin_dir" "$quarantine_root"
 
 printf 'fetching %s metadata for %s\n' "$native_package" "$native_version"
@@ -523,6 +547,10 @@ if [[ "$run_check" == 1 ]]; then
 fi
 
 if [[ -e "$target_dir" || -L "$target_dir" ]]; then
+  if [[ -n "$managed_lock" && -f "$target_dir/.safe-codex-managed" ]]; then
+    exec 7>>"$managed_lock"
+    flock -n -x 7 || die "cannot replace $version: it is in use"
+  fi
   if [[ "$replace_existing" != 1 ]]; then
     die "$target_dir already exists; rerun with --replace to replace it"
   fi
@@ -532,9 +560,18 @@ if [[ -e "$target_dir" || -L "$target_dir" ]]; then
   printf 'backed up existing payload to %s\n' "$backup_dir"
 fi
 
+if [[ -n "$managed_lock" ]]; then
+  printf "1\n" >"$staging_dir/$version/.safe-codex-managed"
+fi
 mv "$staging_dir/$version" "$target_dir"
 backup_existing_launcher "$launcher" "$quarantine_root"
-write_launcher "$launcher" "$target_dir" "$binary_relative" "$allow_update"
+write_launcher "$launcher" "$target_dir" "$binary_relative" "$allow_update" "$managed_lock"
+
+if [[ "$keep_old" != 1 && -n "$managed_lock" ]]; then
+  if ! python3 "$(dirname "$0")/cleanup-native-codex-cli" "$install_root" "$version"; then
+    printf "Installed %s, but cleanup failed; see errors above.\n" "$version" >&2
+  fi
+fi
 
 printf '\nInstalled native Codex CLI %s.\n' "$version"
 printf 'Payload:  %s\n' "$target_dir"

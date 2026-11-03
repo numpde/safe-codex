@@ -118,6 +118,13 @@ Install native Codex without `npm`, `npx`, `corepack`, `nvm`, or `node`:
 ./bin/install-native-codex-cli --version 0.130.0
 ```
 
+On Linux, the installer removes older stable payloads that it created with its
+locking protocol and that are not running through the generated launcher. It
+keeps newer, prerelease, and unmarked legacy payloads. Pass `--keep-old` to
+retain all versions. The lock covers runs started through the launcher; direct
+binary invocations and detached helpers are not protected. On macOS, automatic
+cleanup is skipped.
+
 To bind its downloads to a particular network interface (for example, Wi-Fi
 instead of a USB modem), set `SAFE_CODEX_DOWNLOAD_INTERFACE`:
 

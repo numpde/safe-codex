@@ -33,6 +33,8 @@ if command -v shellcheck >/dev/null 2>&1; then
     bin/check
 fi
 
+python3 -B tests/test-native-cleanup.py
+
 if ! rg -Fqx 'ENTRYPOINT ["node", "--expose-internals", "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"]' Containerfile.deepseek; then
   printf 'Containerfile.deepseek must pass --expose-internals directly to the dsh Node process\n' >&2
   exit 1
